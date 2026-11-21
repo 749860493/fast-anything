@@ -31,7 +31,7 @@ Ports are compiled with your Rust toolchain ([rustup](https://rustup.rs)).
 ## Use
 
 ```sh
-fast-anything go --agent claude -- python app.py     # or: -- node app.ts / ruby app.rb / java App.java / go run . / php app.php
+fast-anything go --agent claude -- python app.py     # or: -- node app.ts / ruby app.rb / java App.java / mvn exec:java / gradle run / go run . / php app.php
 ```
 
 Or step by step:
@@ -88,7 +88,7 @@ fast-anything ports the outermost loop it can, not the tiny function called insi
 | Python 3.10+ | PyO3 | ✅ |
 | JavaScript / TypeScript (Node 22+) | napi-rs | ✅ |
 | Ruby 3.3+ | C ABI + JSON, through Ruby's built-in Fiddle | ✅ |
-| Java 22+ (`java App.java`) | the same C bridge, through the FFM API | ✅ |
+| Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API | ✅ |
 | Go 1.22+ (`go run .`) | the same C bridge, through the Windows loader or dlopen (cgo) | ✅ |
 | PHP 8.1+ (`php app.php`) | the same C bridge, through PHP's FFI extension (`extension=ffi`) | ✅ |
 | C, C++ | the same C bridge | next |

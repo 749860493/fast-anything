@@ -25,11 +25,67 @@ const BRIDGE: &str = include_str!("java/Bridge.java");
 const VALUE_OPTS: &[&str] =
     &["-cp", "-classpath", "--class-path", "-p", "--module-path", "--add-modules", "--source", "--limit-modules"];
 
+/// How the app is started: a source file, or a Maven or Gradle build.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Runner {
+    Source,
+    Maven,
+    Gradle,
+}
+
+fn runner(program: &str) -> Option<Runner> {
+    match util::program_stem(program).trim_end_matches(".cmd").trim_end_matches(".bat") {
+        "java" => Some(Runner::Source),
+        "mvn" | "mvnw" | "mvnd" => Some(Runner::Maven),
+        "gradle" | "gradlew" => Some(Runner::Gradle),
+        _ => None,
+    }
+}
+
 pub fn is_java(program: &str) -> bool {
-    util::program_stem(program) == "java"
+    runner(program).is_some()
+}
+
+/// The program as given, or its .cmd / .bat twin on Windows (mvn, gradlew).
+fn build_tool(program: &str, root: &Path) -> Result<String> {
+    let base = if program.contains(['/', '\\']) { root.join(program) } else { PathBuf::from(program) };
+    let mut candidates = vec![base.clone()];
+    if cfg!(windows) && base.extension().is_none() {
+        candidates.insert(0, base.with_extension("cmd"));
+        candidates.insert(1, base.with_extension("bat"));
+    }
+    for c in candidates {
+        if let Ok(out) = Command::new(&c).arg("--version").current_dir(root).stdin(Stdio::null()).output()
+            && out.status.success()
+        {
+            return Ok(c.to_string_lossy().into_owned());
+        }
+    }
+    bail!("{program} didn't run: is it installed (or is the wrapper script in the project)?")
+}
+
+/// The JDK that runs the build: JAVA_HOME, else java on the PATH.
+fn build_java(root: &Path) -> Result<String> {
+    match std::env::var_os("JAVA_HOME").filter(|h| !h.is_empty()) {
+        Some(home) => {
+            let java = Path::new(&home).join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+            resolve_java(&java.to_string_lossy(), root)
+        }
+        None => resolve_java("java", root),
+    }
 }
 
 pub fn resolve(program: &str, root: &Path) -> Result<String> {
+    match runner(program) {
+        Some(Runner::Maven | Runner::Gradle) => {
+            build_java(root)?;
+            build_tool(program, root)
+        }
+        _ => resolve_java(program, root),
+    }
+}
+
+fn resolve_java(program: &str, root: &Path) -> Result<String> {
     let prog = if program.contains(['/', '\\']) { root.join(program) } else { PathBuf::from(program) };
     let out = output(Command::new(&prog).args(["-XshowSettings:properties", "-version"]).current_dir(root), "java")?;
     let text = combined(&out);
@@ -66,10 +122,37 @@ fn entry(args: &[String]) -> Result<&str> {
     }
 }
 
-fn source_files(root: &Path, entry: &str) -> Vec<PathBuf> {
-    let start = root.join(entry).parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+/// The app's sources: the folder of the source file, or every src/main/java of a build.
+fn sources(root: &Path, program: &str, args: &[String]) -> Result<Vec<PathBuf>> {
+    if runner(program) == Some(Runner::Source) {
+        let entry = entry(args)?;
+        return Ok(source_files(root.join(entry).parent().unwrap_or(root)));
+    }
+    let mut dirs = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let main = dir.join("src").join("main").join("java");
+        if main.is_dir() {
+            dirs.push(main);
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir()
+                && !name.starts_with('.')
+                && !["target", "build", "out", "node_modules", "src"].contains(&name.as_str())
+            {
+                stack.push(e.path());
+            }
+        }
+    }
+    ensure!(!dirs.is_empty(), "no src/main/java folder in this project");
+    Ok(dirs.iter().flat_map(|d| source_files(d)).collect())
+}
+
+fn source_files(start: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![start];
+    let mut stack = vec![start.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         for e in entries.flatten() {
@@ -144,31 +227,64 @@ fn hotspot(ctx: &Ctx, m: &Method, total: f64, wall: f64, own: u64, incl: u64) ->
     }
 }
 
-pub fn profile(ctx: &Ctx, java: &str, args: &[String]) -> Result<Profile> {
-    let entry = entry(args)?.to_string();
-    let jfr_file = ctx.fast.join("profile.jfr");
-    let _ = fs::remove_file(&jfr_file);
+/// What bench times: Gradle runs without its daemon, which would otherwise outlive the run and
+/// hold its output pipe open.
+pub fn bench_command(ctx: &Ctx, program: &str) -> Result<(String, Vec<String>)> {
+    let mut args = ctx.state.command[1..].to_vec();
+    if runner(program) == Some(Runner::Gradle) && !args.iter().any(|a| a == "--no-daemon") {
+        args.insert(0, "--no-daemon".into());
+    }
+    Ok((program.to_string(), args))
+}
+
+/// The app's command, ready to run: for Gradle without a lingering daemon.
+fn app_command(program: &str, args: &[String]) -> Command {
+    let mut cmd = Command::new(program);
+    if runner(program) == Some(Runner::Gradle) {
+        cmd.arg("--no-daemon");
+    }
+    cmd.args(args);
+    cmd
+}
+
+pub fn profile(ctx: &Ctx, program: &str, args: &[String]) -> Result<Profile> {
+    let build = runner(program) != Some(Runner::Source);
+    let java = if build { build_java(&ctx.root)? } else { program.to_string() };
+    let jfr_dir = ctx.fast.join("jfr");
+    let _ = fs::remove_dir_all(&jfr_dir);
+    fs::create_dir_all(&jfr_dir)?;
+    let flags = format!(
+        "-XX:StartFlightRecording:filename={}/%p.jfr,settings=profile -Xlog:jfr+startup=error",
+        util::forward_slashes(&jfr_dir)
+    );
+    let mut cmd = if build { app_command(program, args) } else { Command::new(program) };
+    if build {
+        // every JVM the build starts (Maven's own, Gradle's forked app) records itself
+        let existing = std::env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
+        cmd.env("JAVA_TOOL_OPTIONS", format!("{existing} {flags}").trim());
+    } else {
+        cmd.args(flags.split(' ')).args(args);
+    }
     let started = Instant::now();
-    let run = output(
-        Command::new(java)
-            .arg("-XX:StartFlightRecording:filename=.fast/profile.jfr,settings=profile")
-            .arg("-Xlog:jfr+startup=error")
-            .args(args)
-            .current_dir(&ctx.root)
-            .env(DISABLE_ENV, "1")
-            .stdin(Stdio::null()),
-        "java",
-    )?;
+    let run = output(cmd.current_dir(&ctx.root).env(DISABLE_ENV, "1").stdin(Stdio::null()), program)?;
     let wall = started.elapsed().as_secs_f64();
     ensure!(run.status.success(), "the app failed ({}):\n{}", run.status, tail(&combined(&run), 30));
-    let printed = output(
-        Command::new(tool(java, "jfr")).args(["print", "--events", "jdk.ExecutionSample", "--json"]).arg(&jfr_file),
-        "jfr",
-    )?;
-    ensure!(printed.status.success(), "reading the flight recording failed:\n{}", tail(&combined(&printed), 10));
-    let recording: Value = serde_json::from_slice(&printed.stdout).context("parsing the flight recording")?;
+    let mut events = Vec::new();
+    for f in fs::read_dir(&jfr_dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jfr")) {
+        let printed = output(
+            Command::new(tool(&java, "jfr")).args(["print", "--events", "jdk.ExecutionSample", "--json"]).arg(&f),
+            "jfr",
+        )?;
+        ensure!(printed.status.success(), "reading the flight recording failed:\n{}", tail(&combined(&printed), 10));
+        let recording: Value = serde_json::from_slice(&printed.stdout).context("parsing the flight recording")?;
+        if let Some(list) = recording["recording"]["events"].as_array() {
+            events.extend(list.iter().cloned());
+        }
+    }
+    ensure!(!events.is_empty(), "no flight recording was written: did a JVM run the app?");
+    let recording = serde_json::json!({ "recording": { "events": events } });
 
-    let methods = describe(ctx, java, &source_files(&ctx.root, &entry))?;
+    let methods = describe(ctx, &java, &sources(&ctx.root, program, args)?)?;
     let mut by_name: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (i, m) in methods.iter().enumerate() {
         by_name.entry((m.class.clone(), m.name.clone())).or_default().push(i);
@@ -268,7 +384,7 @@ fn record_prologue(hs: &Hotspot) -> String {
     )
 }
 
-pub fn record(ctx: &Ctx, java: &str, args: &[String], hs: &Hotspot, out: &Path, limit: usize) -> Result<Recording> {
+pub fn record(ctx: &Ctx, program: &str, args: &[String], hs: &Hotspot, out: &Path, limit: usize) -> Result<Recording> {
     let file = ctx.root.join(&hs.file);
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", hs.file))?;
     let rec = REC.replace("/*PACKAGE*/", &package_line(&text)).replace("/*ID*/", &hs.id).replace("/*JSON*/", JSON);
@@ -284,15 +400,14 @@ pub fn record(ctx: &Ctx, java: &str, args: &[String], hs: &Hotspot, out: &Path, 
     patches.write(&native::sibling(&file, "FastAnythingRec.java")?, &rec)?;
     patches.write(&file, &patched)?;
     let run = output(
-        Command::new(java)
-            .args(args)
+        app_command(program, args)
             .current_dir(&ctx.root)
             .env("FAST_ANYTHING_RECORD_OUT", out)
             .env("FAST_ANYTHING_RECORD_META", &meta)
             .env("FAST_ANYTHING_RECORD_LIMIT", limit.to_string())
             .env(DISABLE_ENV, "1")
             .stdin(Stdio::null()),
-        "java",
+        program,
     );
     patches.restore()?;
     let run = run?;
@@ -364,7 +479,42 @@ fn hotspot_of<'a>(ctx: &'a Ctx, port: &Port) -> Result<&'a Hotspot> {
         .with_context(|| format!("{} isn't in the last scan: scan again", port.id))
 }
 
+/// The Java release a Maven or Gradle build compiles for, when it says.
+fn declared_release(root: &Path) -> Option<u32> {
+    let num = |s: &str| -> Option<u32> {
+        let digits: String =
+            s.trim_start_matches(|c: char| !c.is_ascii_digit()).chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok().map(|n: u32| if n == 1 { 8 } else { n })
+    };
+    let mut found = Vec::new();
+    for name in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+        let Ok(text) = fs::read_to_string(root.join(name)) else { continue };
+        for key in [
+            "<maven.compiler.release>",
+            "<release>",
+            "<maven.compiler.source>",
+            "<source>",
+            "JavaLanguageVersion.of(",
+            "VERSION_",
+            "release =",
+            "release.set(",
+        ] {
+            for (i, _) in text.match_indices(key) {
+                if let Some(n) = num(&text[i + key.len()..(i + key.len() + 12).min(text.len())]) {
+                    found.push(n);
+                }
+            }
+        }
+    }
+    found.into_iter().min()
+}
+
 pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
+    if let Some(release) = declared_release(&ctx.root).filter(|r| *r < 22) {
+        bail!(
+            "the build compiles for Java {release}; the Rust bridge uses the FFM API from Java 22. Raise the release to 22+ (or run the app as  java App.java)"
+        );
+    }
     let hs = hotspot_of(ctx, port)?;
     let file = ctx.root.join(&port.file);
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
@@ -421,5 +571,20 @@ mod tests {
         );
         assert!(entry(&["-jar".into(), "app.jar".into()]).is_err());
         assert!(is_java("C:\\jdk\\bin\\java.exe") && !is_java("javac"));
+        assert_eq!(runner("mvn"), Some(Runner::Maven));
+        assert_eq!(runner("./gradlew"), Some(Runner::Gradle));
+        assert_eq!(runner("gradlew.bat"), Some(Runner::Gradle));
+        let dir = std::env::temp_dir().join("fa-release-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pom.xml"),
+            "<properties><maven.compiler.release>17</maven.compiler.release></properties>",
+        )
+        .unwrap();
+        assert_eq!(declared_release(&dir), Some(17));
+        std::fs::write(dir.join("pom.xml"), "<project/>").unwrap();
+        std::fs::write(dir.join("build.gradle.kts"), "tasks.withType<JavaCompile> { options.release = 25 }").unwrap();
+        assert_eq!(declared_release(&dir), Some(25));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

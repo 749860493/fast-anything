@@ -24,7 +24,7 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
         "put the command that runs your app after --, e.g.  fast-anything scan -- python app.py"
     );
     let mut ctx = Ctx::open(root)?;
-    let lang = Lang::detect(&command[0])?;
+    let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);
     let exe = lang.resolve(&command[0], &ctx.root)?;
     ui::step(format!("profiling {}", ui::bold(command.join(" "))));
     let profile = lang.profile(&ctx, &exe, &command[1..])?;

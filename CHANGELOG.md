@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Java apps built with Maven (`mvn -q compile exec:java`) or Gradle (`gradle -q run`): sources come from `src/main/java`, every JVM the build starts is profiled, and Gradle runs without its daemon.
+
 ## 0.3.0
 
 - PHP (8.1+): apps run as `php app.php`. Profiled with a one-line timer per function for one run, parsed with PHP's tokenizer, ports called through the FFI extension.

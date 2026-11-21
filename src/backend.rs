@@ -4,7 +4,7 @@
 use crate::hotspot::Hotspot;
 use crate::state::{Ctx, Port, Verify};
 use crate::util::{output, tail};
-use crate::{golang, java, node, php, python, ruby};
+use crate::{cfamily, golang, java, node, php, python, ruby};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,6 +21,8 @@ pub enum Lang {
     Java,
     Go,
     Php,
+    C,
+    Cpp,
 }
 
 #[derive(Deserialize)]
@@ -52,16 +54,18 @@ impl Lang {
             Ok(Lang::Go)
         } else if php::is_php(program) {
             Ok(Lang::Php)
+        } else if let Some(lang) = cfamily::detect(program) {
+            Ok(lang)
         } else {
             bail!(
-                "fast-anything speaks Python, Node.js (JavaScript/TypeScript), Ruby, Java, Go and PHP. Start the command with one of them:\n    fast-anything scan -- python app.py\n    fast-anything scan -- node app.js\n    fast-anything scan -- ruby app.rb\n    fast-anything scan -- java App.java\n    fast-anything scan -- go run .\n    fast-anything scan -- php app.php"
+                "fast-anything speaks Python, Node.js (JavaScript/TypeScript), Ruby, Java, Go, PHP, C and C++. Start the command with one of them:\n    fast-anything scan -- python app.py\n    fast-anything scan -- node app.js\n    fast-anything scan -- ruby app.rb\n    fast-anything scan -- java App.java\n    fast-anything scan -- go run .\n    fast-anything scan -- php app.php\n    fast-anything scan -- clang -O2 main.c  (or gcc, g++, clang++)"
             )
         }
     }
 
     /// Ports called through the C entry point, with the port in src/port.rs.
     pub fn c_bridge(self) -> bool {
-        matches!(self, Lang::Ruby | Lang::Java | Lang::Go | Lang::Php)
+        matches!(self, Lang::Ruby | Lang::Java | Lang::Go | Lang::Php | Lang::C | Lang::Cpp)
     }
 
     pub fn label(self) -> &'static str {
@@ -72,6 +76,8 @@ impl Lang {
             Lang::Java => "Java",
             Lang::Go => "Go",
             Lang::Php => "PHP",
+            Lang::C => "C",
+            Lang::Cpp => "C++",
         }
     }
 
@@ -83,6 +89,7 @@ impl Lang {
             Lang::Java => java::resolve(program, root),
             Lang::Go => golang::resolve(program, root),
             Lang::Php => php::resolve(program, root),
+            Lang::C | Lang::Cpp => cfamily::resolve(program, root),
         }
     }
 
@@ -94,6 +101,7 @@ impl Lang {
             Lang::Java => java::profile(ctx, exe, args),
             Lang::Go => golang::profile(ctx, exe, args),
             Lang::Php => php::profile(ctx, exe, args),
+            Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
         }
     }
 
@@ -113,6 +121,7 @@ impl Lang {
             Lang::Java => java::record(ctx, exe, args, hs, out, limit),
             Lang::Go => golang::record(ctx, exe, args, hs, out, limit),
             Lang::Php => php::record(ctx, exe, args, hs, out, limit),
+            Lang::C | Lang::Cpp => cfamily::record(ctx, exe, args, hs, out, self),
         }
     }
 
@@ -124,6 +133,7 @@ impl Lang {
             Lang::Java => java::scaffold(ctx, hs, helpers, port),
             Lang::Go => golang::scaffold(ctx, hs, helpers, port),
             Lang::Php => php::scaffold(ctx, hs, helpers, port),
+            Lang::C | Lang::Cpp => cfamily::scaffold(ctx, hs, helpers, port),
         }
     }
 
@@ -135,6 +145,7 @@ impl Lang {
             Lang::Java => java::verify(ctx, port),
             Lang::Go => golang::verify(ctx, port),
             Lang::Php => php::verify(ctx, port),
+            Lang::C | Lang::Cpp => cfamily::verify(ctx, port),
         }
     }
 
@@ -146,6 +157,7 @@ impl Lang {
             Lang::Java => java::enable(ctx, port),
             Lang::Go => golang::enable(ctx, port),
             Lang::Php => php::enable(ctx, port),
+            Lang::C | Lang::Cpp => cfamily::enable(ctx, port),
         }
     }
 
@@ -157,6 +169,7 @@ impl Lang {
             Lang::Java => java::disable(ctx, port),
             Lang::Go => golang::disable(ctx, port),
             Lang::Php => php::disable(ctx, port),
+            Lang::C | Lang::Cpp => cfamily::disable(ctx, port),
         }
     }
 
@@ -165,6 +178,8 @@ impl Lang {
         let exe = ctx.runtime()?;
         match self {
             Lang::Go => golang::bench_command(ctx, exe),
+            Lang::Java => java::bench_command(ctx, exe),
+            Lang::C | Lang::Cpp => cfamily::bench_command(ctx, exe),
             _ => Ok((exe.to_string(), ctx.state.command[1..].to_vec())),
         }
     }
@@ -183,7 +198,7 @@ impl Lang {
             Lang::Python => format!("{ext}.abi3.so"),
             Lang::Node => format!("{ext}.node"),
             // loaded through a C FFI (Fiddle, FFM, ...): the platform's own library name
-            Lang::Ruby | Lang::Java | Lang::Go | Lang::Php => built.clone(),
+            Lang::Ruby | Lang::Java | Lang::Go | Lang::Php | Lang::C | Lang::Cpp => built.clone(),
         };
         (built, dest)
     }

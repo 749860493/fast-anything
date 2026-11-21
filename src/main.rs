@@ -3,6 +3,7 @@
 mod agent;
 mod backend;
 mod bench;
+mod cfamily;
 mod doctor;
 mod golang;
 mod hotspot;
