@@ -1,0 +1,4 @@
+/target
+**/.fast/target/
+**/.fast/lib/
+examples/*/.fast/

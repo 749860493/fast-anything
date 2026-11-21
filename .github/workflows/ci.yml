@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.14"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - name: end to end on the demo (reference port instead of an agent)
+        working-directory: examples/fuzzy-dedupe
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- python app.py
+          $fa port
+          cp reference/lib.rs .fast/ports/$(ls .fast/ports)/src/lib.rs
+          $fa verify
+          $fa enable
+          python app.py
+          $fa bench --runs 2
+          $fa report
+          $fa disable
+          git diff --exit-code fuzzy.py
+      - name: end to end, TypeScript
+        working-directory: examples/fuzzy-dedupe-ts
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- node app.ts
+          $fa port
+          cp reference/lib.rs .fast/ports/$(ls .fast/ports)/src/lib.rs
+          $fa verify
+          $fa enable
+          node app.ts
+          $fa bench --runs 2
+          $fa disable
+          git diff --exit-code fuzzy.ts
+      - name: end to end, Ruby
+        working-directory: examples/fuzzy-dedupe-rb
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- ruby app.rb
+          $fa port
+          cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
+          $fa verify
+          $fa enable
+          ruby app.rb
+          $fa bench --runs 2
+          $fa disable
+          git diff --exit-code fuzzy.rb
