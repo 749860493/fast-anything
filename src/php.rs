@@ -133,7 +133,7 @@ fn hotspot(ctx: &Ctx, f: &Func, calls: u64, own: f64, cum: f64) -> Hotspot {
 
 /// Insert text right after the { of each function (same line: no line numbers move).
 fn insert_at(text: &str, mut at: Vec<(usize, String)>) -> String {
-    at.sort_by(|a, b| b.0.cmp(&a.0));
+    at.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut out = text.to_string();
     for (offset, piece) in at {
         out.insert_str(offset, &piece);
