@@ -54,6 +54,12 @@ pub fn run() -> Result<()> {
             hint: "https://php.net",
         },
         Check {
+            name: "clang",
+            found: version("clang", &["--version"]).or_else(|| version("gcc", &["--version"])),
+            need: "for C/C++ apps (or gcc)",
+            hint: "https://llvm.org",
+        },
+        Check {
             name: "claude",
             found: version("claude", &["--version"]),
             need: "--agent claude",
@@ -81,7 +87,10 @@ pub fn run() -> Result<()> {
         }
     }
     ensure!(checks[0].found.is_some(), "Rust is needed to build ports");
-    ensure!(checks[1..7].iter().any(|c| c.found.is_some()), "install Python, Node.js, Ruby, Java, Go or PHP");
+    ensure!(
+        checks[1..8].iter().any(|c| c.found.is_some()),
+        "install Python, Node.js, Ruby, Java, Go, PHP or a C compiler"
+    );
     ui::ok("ready");
     Ok(())
 }

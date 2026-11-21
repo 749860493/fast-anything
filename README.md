@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@el4cteo/fast-anything"><img src="https://img.shields.io/npm/v/@el4cteo/fast-anything?color=f74c00&label=npm" alt="npm"></a>
   <a href="https://crates.io/crates/fast-anything"><img src="https://img.shields.io/crates/v/fast-anything?color=f74c00" alt="crates.io"></a>
   <a href="https://github.com/EL4CTEO/fast-anything/actions/workflows/ci.yml"><img src="https://github.com/EL4CTEO/fast-anything/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/Python%20%C2%B7%20Node%20%C2%B7%20TypeScript%20%C2%B7%20Ruby%20%C2%B7%20Java%20%C2%B7%20Go%20%C2%B7%20PHP-2563eb" alt="Python, Node, TypeScript, Ruby, Java, Go, PHP">
+  <img src="https://img.shields.io/badge/Python%20%C2%B7%20Node%20%C2%B7%20TypeScript%20%C2%B7%20Ruby%20%C2%B7%20Java%20%C2%B7%20Go%20%C2%B7%20PHP%20%C2%B7%20C%20%C2%B7%20C%2B%2B-2563eb" alt="Python, Node, TypeScript, Ruby, Java, Go, PHP, C, C++">
   <img src="https://img.shields.io/badge/Claude%20Code-plugin-d97757" alt="Claude Code plugin">
   <img src="https://img.shields.io/badge/MCP-server-555" alt="MCP server">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-555" alt="MIT"></a>
@@ -31,7 +31,7 @@ Ports are compiled with your Rust toolchain ([rustup](https://rustup.rs)).
 ## Use
 
 ```sh
-fast-anything go --agent claude -- python app.py     # or: -- node app.ts / ruby app.rb / java App.java / mvn exec:java / gradle run / go run . / php app.php
+fast-anything go --agent claude -- python app.py     # or: -- node app.ts / ruby app.rb / java App.java / mvn exec:java / gradle run / go run . / php app.php / clang -O2 main.c
 ```
 
 Or step by step:
@@ -56,7 +56,7 @@ That port looked right but compared bytes instead of characters. 148 of 500 real
 
 ## Results
 
-Real runs on an i5-10500, Windows 11. Reproduce them from [`examples/`](examples).
+Real runs on an i5-10500, Windows 11 (C and C++: a 4-core GitHub Actions Linux runner). Reproduce them from [`examples/`](examples).
 
 | app | before | after |
 |---|---|---|
@@ -66,6 +66,8 @@ Real runs on an i5-10500, Windows 11. Reproduce them from [`examples/`](examples
 | Go fuzzy dedupe (3,000 names) | 3.02s | **144ms, 21×** |
 | Ruby fuzzy dedupe (400 names) | 3.13s | **228ms, 14×** |
 | Java fuzzy dedupe (4,000 names) | 3.50s | **1.18s, 3×** (11× on the function; the rest is JVM startup) |
+| C mandelbrot (8 zoom levels) | 431ms | **127ms, 3.4×** |
+| C++ fuzzy dedupe (6,000 names) | 3.02s | **1.09s, 2.7×** |
 
 fast-anything ports the outermost loop it can, not the tiny function called inside it, so the app crosses into Rust once instead of millions of times. Porting only the inner `levenshtein` gave 35× and 1.9×.
 
@@ -91,11 +93,11 @@ fast-anything ports the outermost loop it can, not the tiny function called insi
 | Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API | ✅ |
 | Go 1.22+ (`go run .`) | the same C bridge, through the Windows loader or dlopen (cgo) | ✅ |
 | PHP 8.1+ (`php app.php`) | the same C bridge, through PHP's FFI extension (`extension=ffi`) | ✅ |
-| C, C++ | the same C bridge | next |
+| C and C++ (gcc or clang: `clang -O2 main.c lib.c`) | the same C bridge, through LoadLibrary or dlopen | ✅ |
 
-It ports top-level, deterministic functions that take plain data (numbers, strings, lists, dicts, typed arrays…), including ones in your entry script when its main code sits under `if __name__ == "__main__":` (or `if __FILE__ == $0`). In Java and PHP that means static methods (and PHP functions), in Go plain functions. `scan` says why anything else can't move yet.
+It ports top-level, deterministic functions that take plain data (numbers, strings, lists, dicts, typed arrays…), including ones in your entry script when its main code sits under `if __name__ == "__main__":` (or `if __FILE__ == $0`). In Java and PHP that means static methods (and PHP functions), in Go plain functions, in C and C++ free functions and static methods. `scan` says why anything else can't move yet.
 
-Ruby, Java, Go and PHP need no headers, bindings or extra tools: the port is a plain Rust library with one C entry point taking and returning JSON, and fast-anything replays the recorded calls against it directly. Any language that can call C can use that bridge.
+Ruby, Java, Go, PHP, C and C++ need no headers, bindings or extra tools: the port is a plain Rust library with one C entry point taking and returning JSON, and fast-anything replays the recorded calls against it directly. Any language that can call C can use that bridge.
 
 ## License
 
