@@ -68,8 +68,8 @@ fn time_once(ctx: &Ctx, python: &str, args: &[String], original: bool) -> Result
 }
 
 pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
-    let python = ctx.runtime()?;
-    let args = &ctx.state.command[1..];
+    let (python, args) = ctx.state.lang.bench_command(ctx)?;
+    let (python, args) = (python.as_str(), args.as_slice());
     let ports: Vec<String> = ctx.state.ports.values().filter(|p| p.enabled).map(|p| p.id.clone()).collect();
     if ports.is_empty() {
         ui::warn("no ports are enabled yet, so before and after are the same code");

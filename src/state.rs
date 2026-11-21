@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const GITIGNORE: &str = "# fast-anything: commit ports/*/src and Cargo.toml (your Rust ports); skip the rest\n\
-target/\nlib/\nrunner.py\njob-*.json\nprofile.json\nverify.json\n*.jsonl\n*.log\n";
+target/\nlib/\nbin/\nbackup/\nrunner.*\nrecorder.*\nDescribe.java\n*.txt\njob-*.json\nprofile.*\n*.pprof\nverify.json\n*.jsonl\n*.meta.json\n*.log\n";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,6 +48,9 @@ pub struct Port {
     pub lang: Lang,
     #[serde(default)]
     pub owner: Option<String>,
+    /// Where the function started when it was ported (to find it again among overloads).
+    #[serde(default)]
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

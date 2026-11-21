@@ -489,6 +489,7 @@ mod tests {
             enabled: false,
             lang: crate::backend::Lang::Python,
             owner: None,
+            line: 1,
         }
     }
 

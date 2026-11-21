@@ -30,6 +30,14 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -75,3 +83,31 @@ jobs:
           $fa bench --runs 2
           $fa disable
           git diff --exit-code fuzzy.rb
+      - name: end to end, Java
+        working-directory: examples/fuzzy-dedupe-java
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- java App.java
+          $fa port
+          cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
+          $fa verify
+          $fa enable
+          java --enable-native-access=ALL-UNNAMED App.java
+          $fa bench --runs 2
+          $fa disable
+          git diff --exit-code Fuzzy.java
+          test -z "$(git status --porcelain .)"
+      - name: end to end, Go
+        working-directory: examples/fuzzy-dedupe-go
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- go run .
+          $fa port
+          cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
+          $fa verify
+          $fa enable
+          go run .
+          $fa bench --runs 2
+          $fa disable
+          git diff --exit-code fuzzy.go main.go
+          test -z "$(git status --porcelain .)"

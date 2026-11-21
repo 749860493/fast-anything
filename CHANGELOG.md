@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0
+
+- Java (22+): apps run as `java App.java`. Profiled with Flight Recorder, parsed with javac's own parser, ports called through the FFM API.
+- Go (1.22+): apps run as `go run .`. Profiled with pprof, bench times a prebuilt binary so the compiler isn't counted. Ports load through the Windows loader or dlopen.
+- Ports for the C-bridge languages are now verified by fast-anything itself, in a child process, so a crashing port can't take it down.
+- Temporary edits made while profiling or recording are backed up in `.fast/backup` and restored even after an interrupted run.
+
 ## 0.1.0
 
 - Profile, port, verify, enable, bench and report for Python (PyO3), Node.js/TypeScript (napi-rs) and Ruby (C ABI + JSON via Fiddle, no headers needed).

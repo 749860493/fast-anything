@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 const PROTOCOL: &str = "2025-06-18";
 
-const INSTRUCTIONS: &str = "fast-anything speeds up Python, Node.js and Ruby apps by porting their hottest pure functions to Rust (PyO3 / napi-rs / C ABI) \
+const INSTRUCTIONS: &str = "fast-anything speeds up Python, Node.js, Ruby, Java and Go apps by porting their hottest pure functions to Rust (PyO3 / napi-rs / a C ABI bridge) \
 and proving the port gives the same results on real recorded calls. Loop: fast_scan -> fast_port -> write src/lib.rs \
 following the returned task -> fast_verify (repeat until it passes) -> fast_enable -> fast_bench -> fast_report.";
 
@@ -23,7 +23,7 @@ fn tools() -> Value {
         tool(
             "fast_scan",
             "Run the app under a profiler and rank functions by time share and portability to Rust.",
-            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"node\", \"app.js\"]" }, "path": path }),
+            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "path": path }),
             json!(["command"])
         ),
         tool(
@@ -46,13 +46,13 @@ fn tools() -> Value {
         ),
         tool(
             "fast_disable",
-            "Switch a function back to the original Python.",
+            "Switch a function back to the original code.",
             json!({ "id": id, "path": path }),
             json!([])
         ),
         tool(
             "fast_bench",
-            "Time the whole app: original Python vs Rust ports.",
+            "Time the whole app: original code vs Rust ports.",
             json!({ "runs": { "type": "integer", "default": 5 }, "path": path }),
             json!([])
         ),

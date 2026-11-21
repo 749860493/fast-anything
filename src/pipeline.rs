@@ -108,6 +108,7 @@ pub fn port(root: &Path, id: Option<&str>, samples: usize) -> Result<PortOut> {
         enabled,
         lang,
         owner: hs.owner.clone(),
+        line: hs.line,
     };
     let helpers: Vec<Hotspot> = hs
         .calls
@@ -120,7 +121,7 @@ pub fn port(root: &Path, id: Option<&str>, samples: usize) -> Result<PortOut> {
     ctx.save()?;
     Ok(PortOut {
         id: hs.id,
-        lib_rs: dir.join("src").join(if lang == Lang::Ruby { "port.rs" } else { "lib.rs" }),
+        lib_rs: dir.join("src").join(if lang.c_bridge() { "port.rs" } else { "lib.rs" }),
         task_md: dir.join("TASK.md"),
         crate_dir: dir,
         recorded: rec.kept,
@@ -153,7 +154,7 @@ pub fn verify(root: &Path, id: Option<&str>) -> Result<(String, Verify)> {
         if let Some(p) = ctx.state.ports.get_mut(&id) {
             p.enabled = false;
         }
-        ui::warn(format!("{id} was enabled; switched it back to Python until it passes again"));
+        ui::warn(format!("{id} was enabled; switched it back to {} until it passes again", port.lang.label()));
     }
     if let Some(p) = ctx.state.ports.get_mut(&id) {
         p.verify = Some(v.clone());
@@ -233,7 +234,7 @@ pub fn feedback(v: &Verify) -> String {
             out.push_str(&format!("- `{}` should give `{}`, the port gave `{}`\n", f.call, f.expected, f.got));
         }
     }
-    out.push_str("\nFix src/lib.rs.\n");
+    out.push_str(if v.lang.c_bridge() { "\nFix src/port.rs.\n" } else { "\nFix src/lib.rs.\n" });
     out
 }
 

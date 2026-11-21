@@ -4,7 +4,7 @@
 use crate::hotspot::Hotspot;
 use crate::state::{Ctx, Port, Verify};
 use crate::util::{output, tail};
-use crate::{node, python, ruby};
+use crate::{golang, java, node, python, ruby};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -18,6 +18,8 @@ pub enum Lang {
     Python,
     Node,
     Ruby,
+    Java,
+    Go,
 }
 
 #[derive(Deserialize)]
@@ -43,11 +45,20 @@ impl Lang {
             Ok(Lang::Node)
         } else if ruby::is_ruby(program) {
             Ok(Lang::Ruby)
+        } else if java::is_java(program) {
+            Ok(Lang::Java)
+        } else if golang::is_go(program) {
+            Ok(Lang::Go)
         } else {
             bail!(
-                "fast-anything speaks Python, Node.js (JavaScript/TypeScript) and Ruby. Start the command with one of them:\n    fast-anything scan -- python app.py\n    fast-anything scan -- node app.js\n    fast-anything scan -- ruby app.rb"
+                "fast-anything speaks Python, Node.js (JavaScript/TypeScript), Ruby, Java and Go. Start the command with one of them:\n    fast-anything scan -- python app.py\n    fast-anything scan -- node app.js\n    fast-anything scan -- ruby app.rb\n    fast-anything scan -- java App.java\n    fast-anything scan -- go run ."
             )
         }
+    }
+
+    /// Ports called through the C entry point, with the port in src/port.rs.
+    pub fn c_bridge(self) -> bool {
+        matches!(self, Lang::Ruby | Lang::Java | Lang::Go)
     }
 
     pub fn label(self) -> &'static str {
@@ -55,6 +66,8 @@ impl Lang {
             Lang::Python => "Python",
             Lang::Node => "JavaScript",
             Lang::Ruby => "Ruby",
+            Lang::Java => "Java",
+            Lang::Go => "Go",
         }
     }
 
@@ -63,6 +76,8 @@ impl Lang {
             Lang::Python => python::resolve(program, root),
             Lang::Node => node::resolve(program, root),
             Lang::Ruby => ruby::resolve(program, root),
+            Lang::Java => java::resolve(program, root),
+            Lang::Go => golang::resolve(program, root),
         }
     }
 
@@ -71,6 +86,8 @@ impl Lang {
             Lang::Python => python::profile(ctx, exe, args),
             Lang::Node => node::profile(ctx, exe, args),
             Lang::Ruby => ruby::profile(ctx, exe, args),
+            Lang::Java => java::profile(ctx, exe, args),
+            Lang::Go => golang::profile(ctx, exe, args),
         }
     }
 
@@ -87,6 +104,8 @@ impl Lang {
             Lang::Python => python::record(ctx, exe, args, hs, out, limit),
             Lang::Node => node::record(ctx, exe, args, hs, out, limit),
             Lang::Ruby => ruby::record(ctx, exe, args, hs, out, limit),
+            Lang::Java => java::record(ctx, exe, args, hs, out, limit),
+            Lang::Go => golang::record(ctx, exe, args, hs, out, limit),
         }
     }
 
@@ -95,6 +114,8 @@ impl Lang {
             Lang::Python => python::scaffold(ctx, hs, helpers, port),
             Lang::Node => node::scaffold(ctx, hs, helpers, port),
             Lang::Ruby => ruby::scaffold(ctx, hs, helpers, port),
+            Lang::Java => java::scaffold(ctx, hs, helpers, port),
+            Lang::Go => golang::scaffold(ctx, hs, helpers, port),
         }
     }
 
@@ -103,6 +124,8 @@ impl Lang {
             Lang::Python => python::verify(ctx, port),
             Lang::Node => node::verify(ctx, port),
             Lang::Ruby => ruby::verify(ctx, port),
+            Lang::Java => java::verify(ctx, port),
+            Lang::Go => golang::verify(ctx, port),
         }
     }
 
@@ -111,6 +134,8 @@ impl Lang {
             Lang::Python => python::enable(ctx, port),
             Lang::Node => node::enable(ctx, port),
             Lang::Ruby => ruby::enable(ctx, port),
+            Lang::Java => java::enable(ctx, port),
+            Lang::Go => golang::enable(ctx, port),
         }
     }
 
@@ -119,6 +144,17 @@ impl Lang {
             Lang::Python => python::disable(ctx, port),
             Lang::Node => node::disable(ctx, port),
             Lang::Ruby => ruby::disable(ctx, port),
+            Lang::Java => java::disable(ctx, port),
+            Lang::Go => golang::disable(ctx, port),
+        }
+    }
+
+    /// What bench runs: (program, args). Go apps are built once, so the compiler isn't timed.
+    pub fn bench_command(self, ctx: &Ctx) -> Result<(String, Vec<String>)> {
+        let exe = ctx.runtime()?;
+        match self {
+            Lang::Go => golang::bench_command(ctx, exe),
+            _ => Ok((exe.to_string(), ctx.state.command[1..].to_vec())),
         }
     }
 
@@ -135,8 +171,8 @@ impl Lang {
             Lang::Python if cfg!(windows) => format!("{ext}.pyd"),
             Lang::Python => format!("{ext}.abi3.so"),
             Lang::Node => format!("{ext}.node"),
-            // loaded with Fiddle.dlopen: the platform's own library name
-            Lang::Ruby => built.clone(),
+            // loaded through a C FFI (Fiddle, FFM, ...): the platform's own library name
+            Lang::Ruby | Lang::Java | Lang::Go => built.clone(),
         };
         (built, dest)
     }

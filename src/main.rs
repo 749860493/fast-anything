@@ -4,8 +4,11 @@ mod agent;
 mod backend;
 mod bench;
 mod doctor;
+mod golang;
 mod hotspot;
+mod java;
 mod mcp;
+mod native;
 mod node;
 mod pipeline;
 mod python;
@@ -100,6 +103,9 @@ enum Cmd {
     Doctor,
     /// Run as an MCP server on stdio (for Claude Code, Codex, Cursor, ...)
     Mcp,
+    /// Replays recorded calls against a C-bridge port (used by verify, in its own process)
+    #[command(name = "__replay", hide = true)]
+    Replay { job: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -115,8 +121,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cmd: Cmd, root: &Path) -> Result<()> {
-    if matches!(cmd, Cmd::Mcp) {
-        return mcp::serve();
+    match cmd {
+        Cmd::Mcp => return mcp::serve(),
+        Cmd::Replay { job } => return native::replay(&job),
+        _ => {}
     }
     ui::banner();
     match cmd {
@@ -174,6 +182,6 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
             Ok(())
         }
         Cmd::Doctor => doctor::run(),
-        Cmd::Mcp => unreachable!(),
+        Cmd::Mcp | Cmd::Replay { .. } => unreachable!(),
     }
 }

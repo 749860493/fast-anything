@@ -508,6 +508,7 @@ mod tests {
             enabled: false,
             lang: backend::Lang::Node,
             owner: None,
+            line: 1,
         };
         let esm = shim(&port, "./.fast/lib/fa_fuzzy_levenshtein.node", true);
         assert!(esm.contains("createRequire(import.meta.url)(\"./.fast/lib/fa_fuzzy_levenshtein.node\").levenshtein"));
