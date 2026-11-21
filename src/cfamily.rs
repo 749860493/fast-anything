@@ -138,8 +138,20 @@ fn compile(ctx: &Ctx, cc: &str, b: &Build, extra: &[PathBuf], include: Option<&P
         cmd.arg("-include").arg(h);
     }
     let out = output(&mut cmd, cc)?;
-    ensure!(out.status.success(), "building the app failed:\n{}", tail(&combined(&out), 30));
+    ensure!(out.status.success(), "building the app failed:\n{}", errors_first(&combined(&out)));
     Ok(bin)
+}
+
+/// Compiler output with the error lines (and a few after each) first: warnings can bury them.
+fn errors_first(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut keep = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if l.contains("error") && !l.contains("warning") {
+            keep.extend(lines[i..(i + 4).min(lines.len())].iter().copied());
+        }
+    }
+    if keep.is_empty() { tail(log, 30) } else { keep.into_iter().take(40).collect::<Vec<_>>().join("\n") }
 }
 
 fn run(ctx: &Ctx, bin: &Path, b: &Build, env: &[(&str, &Path)], derive: bool) -> Result<std::process::Output> {
@@ -1073,6 +1085,7 @@ pub const FLAVOR_C: Flavor = Flavor {
         "C `int` is `i32`, `long` is `i64` here; unsigned types wrap. Use `wrapping_*` where the original can overflow.",
         "A `const T *` followed by a length arrives as a Vec, and the length parameter still arrives on its own.",
         "`const char *` arrives as a UTF-8 String: `strlen` and `s[i]` are bytes, use `as_bytes()` for the same behavior.",
+        "Floats: compilers may fuse `a * b + c` into one FMA instruction (clang does on ARM), which rounds differently. If recorded results differ in the last digits, the original was built that way: use `f64::mul_add` there, or build the app with `-ffp-contract=off`.",
         "Returns are numbers or bools. Undefined behavior in the original (overflow of signed ints, out-of-bounds reads) isn't a spec: match the defined cases.",
     ],
 };

@@ -161,12 +161,12 @@ jobs:
         working-directory: examples/mandelbrot-c
         run: |
           fa=../../target/release/fast-anything
-          $fa scan -- clang -O2 main.c mandelbrot.c
+          $fa scan -- clang -O2 -ffp-contract=off main.c mandelbrot.c
           $fa port
           cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
           $fa verify
           $fa enable
-          clang -O2 main.c mandelbrot.c -o app && ./app
+          clang -O2 -ffp-contract=off main.c mandelbrot.c -o app && ./app
           $fa bench --runs 2
           $fa disable
           git diff --exit-code mandelbrot.c
@@ -174,12 +174,14 @@ jobs:
         working-directory: examples/fuzzy-dedupe-cpp
         run: |
           fa=../../target/release/fast-anything
-          $fa scan -- clang++ -O2 -std=c++17 main.cpp fuzzy.cpp
+          # the runner's standalone clang can be older than the MSVC STL it pairs with
+          extra=""; if [ "$RUNNER_OS" = Windows ]; then extra=-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH; fi
+          $fa scan -- clang++ -O2 -std=c++17 $extra main.cpp fuzzy.cpp
           $fa port
           cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
           $fa verify
           $fa enable
-          clang++ -O2 -std=c++17 main.cpp fuzzy.cpp -o app && ./app
+          clang++ -O2 -std=c++17 $extra main.cpp fuzzy.cpp -o app && ./app
           $fa bench --runs 2
           $fa disable
           git diff --exit-code fuzzy.cpp

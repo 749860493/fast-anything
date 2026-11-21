@@ -1,4 +1,7 @@
 /* fast-anything profiler runtime: compiled into the app for one run. */
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include "fa_clock.h"

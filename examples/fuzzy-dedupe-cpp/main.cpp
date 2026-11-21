@@ -21,7 +21,10 @@ int main() {
     std::vector<std::string> names;
     for (int k = 0; k < 6000; k++) {
         std::string name = std::string(FIRST[next(20)]) + " " + LAST[next(20)];
-        if (next(100) < 35) name[next((unsigned) name.size())] = "aeiourstln"[next(10)];
+        if (next(100) < 35) {
+            size_t at = next((unsigned) name.size());
+            if ((unsigned char) name[at] < 0x80) name[at] = "aeiourstln"[next(10)]; // keep it valid UTF-8
+        }
         names.push_back(name);
     }
     auto pairs = find_duplicates(names, 2);

@@ -1,5 +1,6 @@
 // Count the points inside the Mandelbrot set at a few zoom levels, the slow way.
-//     clang -O2 main.c mandelbrot.c -o mandelbrot
+//     clang -O2 -ffp-contract=off main.c mandelbrot.c -o mandelbrot
+// (-ffp-contract=off: no fused multiply-add, so every compiler gives the same doubles)
 #include <stdio.h>
 
 long long mandelbrot(int width, int height, int max_iter);

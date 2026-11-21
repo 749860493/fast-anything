@@ -1,4 +1,7 @@
 /* fast-anything recorder runtime for C: compiled into the app for one run. */
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
