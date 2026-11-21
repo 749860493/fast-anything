@@ -188,7 +188,7 @@ Only edit files in this folder. Don't touch the {label} project.\n\n\
 ## Real calls\n\n\
 fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
 ## Rules\n\n\
-- Same result for every input, edge cases included: empty input, zero, negatives, unicode.\n\
+- Same result for every input, edge cases included: empty input, zero, negatives, non-ASCII text, very long input. verify tests these too.\n\
 {rules}\
 - Return `Err(message)` where the original would fail.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases. Threads are fine if the result is the same.\n\
@@ -312,14 +312,16 @@ pub fn replay(job_path: &Path) -> Result<()> {
     let text = fs::read_to_string(&job.cases).context("reading recordings.jsonl")?;
     let cases: Vec<Value> =
         text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let (mut passed, mut failed, mut derived) = (0, 0, 0);
+    let (mut passed, mut failed, mut derived, mut edges) = (0, 0, 0, 0);
     let mut failures = Vec::new();
     let mut inputs = Vec::new();
     for (i, case) in cases.iter().enumerate() {
         let input = serde_json::to_vec(&case["args"])?;
         let is_derived = case.get("derived").is_some();
+        let is_edge = case["derived"] == "edge";
         if is_derived {
             derived += 1;
+            edges += usize::from(is_edge);
         } else {
             inputs.push(input.clone());
         }
@@ -341,7 +343,18 @@ pub fn replay(job_path: &Path) -> Result<()> {
                 case["args"].as_array().map(|a| a.iter().map(|v| show(v, 80)).collect()).unwrap_or_default();
             failures.push(Failure {
                 case: i,
-                call: format!("{}{}({})", if is_derived { "(derived) " } else { "" }, job.func, args.join(", ")),
+                call: format!(
+                    "{}{}({})",
+                    if is_edge {
+                        "(edge) "
+                    } else if is_derived {
+                        "(derived) "
+                    } else {
+                        ""
+                    },
+                    job.func,
+                    args.join(", ")
+                ),
                 expected,
                 got: match got {
                     Ok(v) => show(&v, 160),
@@ -351,7 +364,7 @@ pub fn replay(job_path: &Path) -> Result<()> {
         }
     }
 
-    let mut v = Verify { total: cases.len(), derived, passed, failed, failures, ..Verify::default() };
+    let mut v = Verify { total: cases.len(), derived, edges, passed, failed, failures, ..Verify::default() };
     let original_ns = fs::read_to_string(&job.meta)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())

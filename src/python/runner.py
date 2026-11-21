@@ -459,7 +459,8 @@ def cmd_verify(job, _argv):
     derived = derive(original, cases, job.get("derive_budget", 3.0), job.get("derive_limit", 200))
     cases += derived
 
-    report = {"total": len(cases), "derived": len(derived), "passed": 0, "failed": 0, "failures": []}
+    report = {"total": len(cases), "derived": len(derived), "passed": 0, "failed": 0, "failures": [],
+              "edges": sum(1 for c in derived if c.get("derived") == "edge")}
     calls = []
     for i, case in enumerate(cases):
         args = dec(case["args"])
@@ -484,7 +485,7 @@ def cmd_verify(job, _argv):
             shown = [show(a, 80) for a in args] + [k + "=" + show(v, 80) for k, v in kwargs.items()]
             report["failures"].append({
                 "case": i,
-                "call": ("(derived) " if case.get("derived") else "") + job["func"] + "(" + ", ".join(shown) + ")",
+                "call": {"edge": "(edge) ", True: "(derived) "}.get(case.get("derived"), "") + job["func"] + "(" + ", ".join(shown) + ")",
                 "expected": expected,
                 "got": show(got) if err is None else "raised " + type(err).__name__ + ": " + show(str(err), 200),
             })
@@ -517,12 +518,115 @@ def variants(value, rng):
     return out
 
 
-def derive(original, cases, budget, limit):
-    """Extra test cases: recorded calls with smaller inputs, answered by the original itself."""
+NON_ASCII = ("\u00e9", "\u65e5\u672c", "\U0001f44d\U0001f3fd", "e\u0301")
+BIG = 4096  # the longest "huge" input, in items or characters
+EDGE_SAMPLE, EDGE_LIMIT = 20, 100
+GROW = (4, 16, 64, 256, 512)  # how much bigger, step by step, than the short version of an input
+
+
+def edges(value):
+    """Inputs where ports and originals tend to part ways, of the same type as the recorded value."""
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int):
+        return [x for x in (0, 1, -1) if x != value]
+    if isinstance(value, float):
+        return [math.nan, math.inf, -math.inf, -0.0, 0.0, 1e308, 5e-324]
+    if isinstance(value, str):
+        mid = len(value) // 2
+        return [value[:mid] + NON_ASCII[0] + value[mid:], value + NON_ASCII[1], NON_ASCII[2] + value,
+                value + NON_ASCII[3], ""]
+    if isinstance(value, bytes):
+        return [b"", value + b"\x00", b"\xff" + value]
+    if isinstance(value, (list, tuple)) and value:
+        out = [type(value)()]
+        for e in edges(value[0])[:4]:
+            out.append((e,) + tuple(value[1:]) if isinstance(value, tuple) else [e] + list(value[1:]))
+        return out
+    return []
+
+
+def small(value):
+    """A short version of a recorded value, so edge cases stay cheap when the real inputs are big."""
+    if isinstance(value, (list, tuple)):
+        return value[:8]
+    if isinstance(value, (str, bytes)):
+        return value[:64]
+    return value
+
+
+def bigger(value, factor):
+    """The value repeated factor times (None past BIG items or characters)."""
+    if not isinstance(value, (list, tuple, str, bytes)) or not value or len(value) * factor > BIG:
+        return None
+    return value * factor
+
+
+def derive_edges(original, cases, budget, limit):
+    """Edge cases built from a sample of recorded calls: special numbers, non-ASCII text, empty and
+    much bigger inputs. The original answers them; inputs it rejects are skipped."""
     import copy
 
-    rng = random.Random(0xFA57)
     derived, seen, start = [], set(), time.perf_counter()
+
+    def left():
+        return budget - (time.perf_counter() - start)
+
+    def attempt(args, kwargs):
+        try:
+            encoded = {"args": enc(args), "kwargs": {k: enc(v) for k, v in kwargs.items()}}
+            key = json.dumps(encoded, sort_keys=True)
+            if key in seen:
+                return None
+            seen.add(key)
+            t = time.perf_counter()
+            result = original(*copy.deepcopy(args), **copy.deepcopy(kwargs))
+            took = time.perf_counter() - t
+            encoded["result"] = enc(result)
+        except Exception:
+            return None  # outside the function's domain: not a fair test
+        encoded["derived"] = "edge"
+        derived.append(encoded)
+        return took
+
+    grown = set()
+    for case in [c for c in cases if "raises" not in c][:EDGE_SAMPLE]:
+        args = dec(case["args"])
+        kwargs = {k: dec(v) for k, v in case.get("kwargs", {}).items()}
+        base = [small(a) for a in args]
+        for i, arg in enumerate(args):
+            for e in edges(base[i]):
+                if len(derived) >= limit or left() <= 0:
+                    return derived
+                attempt(base[:i] + [e] + base[i + 1:], kwargs)
+            if i in grown or bigger(base[i], 4) is None:
+                continue
+            # much bigger inputs, only while their time (assumed quadratic) fits the budget
+            grown.add(i)
+            try:
+                t = time.perf_counter()
+                original(*copy.deepcopy(base), **copy.deepcopy(kwargs))
+                took = time.perf_counter() - t
+            except Exception:
+                continue
+            for factor in GROW:
+                big = bigger(base[i], factor)
+                if big is None or len(derived) >= limit or took * 16 > left() / 2:
+                    break
+                took = attempt(base[:i] + [big] + base[i + 1:], kwargs)
+                if took is None:
+                    break
+    return derived
+
+
+def derive(original, cases, budget, limit):
+    """Extra test cases: edge cases, then recorded calls with smaller inputs, answered by the original."""
+    import copy
+
+    edge_cases = derive_edges(original, cases, budget / 2, EDGE_LIMIT)
+    rng = random.Random(0xFA57)
+    derived, seen, start = edge_cases, set(), time.perf_counter()
+    limit += len(edge_cases)
     for case in cases:
         if "raises" in case:
             continue

@@ -230,9 +230,104 @@ def variants(value, rng)
   end
 end
 
+NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}"].freeze
+BIG = 4096 # the longest "huge" input, in items or characters
+EDGE_SAMPLE = 20
+EDGE_LIMIT = 100
+GROW = [4, 16, 64, 256, 512].freeze # how much bigger, step by step, than the short version of an input
+
+# Inputs where ports and originals tend to part ways, of the same type as the recorded value.
+def edges(value)
+  case value
+  when Integer then [0, 1, -1].reject { |x| x == value }
+  when Float then [Float::NAN, Float::INFINITY, -Float::INFINITY, -0.0, 0.0, 1e308, 5e-324]
+  when String
+    mid = value.length / 2
+    [value[0, mid] + NON_ASCII[0] + value[mid..], value + NON_ASCII[1], NON_ASCII[2] + value, value + NON_ASCII[3], ""]
+  when Array
+    return [] if value.empty?
+
+    [[]] + edges(value[0]).first(4).map { |e| [e] + value[1..] }
+  else []
+  end
+end
+
+# A short version of a recorded value, so edge cases stay cheap when the real inputs are big.
+def small(value)
+  case value
+  when Array then value.first(8)
+  when String then value[0, 64]
+  else value
+  end
+end
+
+# The value repeated factor times (nil past BIG items or characters).
+def bigger(value, factor)
+  return nil unless (value.is_a?(Array) || value.is_a?(String)) && !value.empty? && value.length * factor <= BIG
+
+  value * factor
+end
+
+# Edge cases from a sample of recorded calls: special numbers, non-ASCII text, empty and much bigger
+# inputs. The original answers them; inputs it rejects are skipped.
+def derive_edges(original, cases, budget, limit)
+  derived = []
+  seen = {}
+  clock = Process::CLOCK_MONOTONIC
+  started = Process.clock_gettime(clock)
+  left = -> { budget - (Process.clock_gettime(clock) - started) }
+  attempt = lambda do |args|
+    encoded = { "args" => FastAnything.enc(args) }
+    key = JSON.generate(encoded)
+    return nil if seen[key]
+
+    seen[key] = true
+    t = Process.clock_gettime(clock)
+    encoded["result"] = FastAnything.enc(original.call(*Marshal.load(Marshal.dump(args))))
+    took = Process.clock_gettime(clock) - t
+    encoded["derived"] = "edge"
+    derived << encoded
+    took
+  rescue StandardError
+    nil # outside the function's domain: not a fair test
+  end
+  grown = {}
+  cases.reject { |c| c.key?("raises") }.first(EDGE_SAMPLE).each do |c|
+    args = FastAnything.dec(c["args"])
+    base = args.map { |a| small(a) }
+    args.each_with_index do |arg, i|
+      edges(base[i]).each do |e|
+        return derived if derived.length >= limit || left.call <= 0
+
+        attempt.call(base.each_with_index.map { |a, j| j == i ? e : a })
+      end
+      next if grown[i] || bigger(base[i], 4).nil?
+
+      # much bigger inputs, only while their time (assumed quadratic) fits the budget
+      grown[i] = true
+      took = begin
+        t = Process.clock_gettime(clock)
+        original.call(*Marshal.load(Marshal.dump(base)))
+        Process.clock_gettime(clock) - t
+      rescue StandardError
+        next
+      end
+      GROW.each do |factor|
+        big = bigger(base[i], factor)
+        break if big.nil? || derived.length >= limit || took * 16 > left.call / 2
+
+        took = attempt.call(base.each_with_index.map { |a, j| j == i ? big : a })
+        break if took.nil?
+      end
+    end
+  end
+  derived
+end
+
 def derive(original, cases, budget, limit)
   rng = Random.new(0xFA57)
-  derived = []
+  derived = derive_edges(original, cases, budget / 2.0, EDGE_LIMIT)
+  limit += derived.length
   seen = {}
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   cases.each do |c|
@@ -301,7 +396,8 @@ def cmd_verify(job, _argv)
   recorded = cases.length
   derived = derive(original, cases, job.fetch("derive_budget", 3.0), job.fetch("derive_limit", 200))
   cases += derived
-  report = { "total" => cases.length, "derived" => derived.length, "passed" => 0, "failed" => 0, "failures" => [] }
+  report = { "total" => cases.length, "derived" => derived.length, "edges" => derived.count { |c| c["derived"] == "edge" },
+             "passed" => 0, "failed" => 0, "failures" => [] }
   calls = []
   cases.each_with_index do |c, i|
     args = FastAnything.dec(c["args"])
@@ -329,7 +425,7 @@ def cmd_verify(job, _argv)
 
     report["failures"] << {
       "case" => i,
-      "call" => "#{c["derived"] ? "(derived) " : ""}#{job["func"]}(#{args.map { |a| show(a, 80) }.join(", ")})",
+      "call" => "#{{ "edge" => "(edge) ", true => "(derived) " }.fetch(c["derived"], "")}#{job["func"]}(#{args.map { |a| show(a, 80) }.join(", ")})",
       "expected" => expected,
       "got" => err ? "raised #{err.class}: #{show(err.message, 200)}" : show(got),
     }

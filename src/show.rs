@@ -107,7 +107,16 @@ pub fn verify(id: &str, v: &Verify) {
                 "{}/{} calls give the same result {}",
                 v.passed,
                 v.total,
-                dim(format!("({} recorded + {} derived)", v.total - v.derived, v.derived))
+                dim(if v.edges > 0 {
+                    format!(
+                        "({} recorded + {} edge cases + {} derived)",
+                        v.total - v.derived,
+                        v.edges,
+                        v.derived - v.edges
+                    )
+                } else {
+                    format!("({} recorded + {} derived)", v.total - v.derived, v.derived)
+                })
             ));
         } else {
             ui::ok(format!("{}/{} recorded calls give the same result", v.passed, v.total));
@@ -119,8 +128,15 @@ pub fn verify(id: &str, v: &Verify) {
                 nanos(m.original_ns),
                 v.lang.label(),
                 nanos(m.rust_ns),
-                rust(bold(format!("{} faster", times(m.speedup))))
+                if v.slower() {
+                    red(bold(format!("{} slower", times(1.0 / m.speedup))))
+                } else {
+                    rust(bold(format!("{} faster", times(m.speedup))))
+                }
             ));
+            if v.slower() {
+                ui::warn(crate::pipeline::slower_hint());
+            }
         }
         return;
     }

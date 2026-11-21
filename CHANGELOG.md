@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+- Edge cases in verify: NaN, ±infinity, -0.0, 0 and ±1, non-ASCII text (accents, CJK, emoji, combining marks), empty and up to 4,096-item inputs, built from the recorded calls and answered by the original. Python, Node.js/TypeScript, Ruby, Go and C++.
+- A port that's right but slower per call than the original (the call into Rust costs more than the work) isn't enabled; `enable --force` overrides.
+
 ## 0.4.0
 
 - C and C++ (gcc or clang): `fast-anything scan -- clang -O2 main.c lib.c`. fast-anything builds the app itself, profiles every function for one run, and loads ports with LoadLibrary or dlopen. C ports take numbers, strings and `const T *` + length arrays; C++ ports also take std::string, vector, array, map and pair.

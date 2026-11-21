@@ -163,6 +163,11 @@ pub fn verify(root: &Path, id: Option<&str>) -> Result<(String, Verify)> {
     Ok((id, v))
 }
 
+/// What to do about a port that's right but slower than the original.
+pub fn slower_hint() -> &'static str {
+    "calling into Rust costs more than this function's work, so it won't be switched on. Port its caller instead (fewer, bigger calls), or  enable --force"
+}
+
 pub fn enable(root: &Path, id: Option<&str>, force: bool) -> Result<String> {
     let mut ctx = Ctx::open(root)?;
     let id = ctx.resolve_port(id)?;
@@ -170,6 +175,9 @@ pub fn enable(root: &Path, id: Option<&str>, force: bool) -> Result<String> {
     let verified = port.verify.as_ref().is_some_and(Verify::ok);
     if !verified && !force {
         bail!("{id} hasn't passed verify yet: run  fast-anything verify {id}  (or --force)");
+    }
+    if let Some(m) = port.verify.as_ref().filter(|v| v.slower() && !force).and_then(|v| v.micro) {
+        bail!("{id} is {} slower per call in Rust: {}", util::times(1.0 / m.speedup), slower_hint());
     }
     port.lang.enable(&ctx, &port)?;
     if let Some(p) = ctx.state.ports.get_mut(&id) {
@@ -300,7 +308,9 @@ pub fn go(
     for id in &picks {
         show::port(&port(root, Some(id), samples)?, false);
         let v = agent_port(root, id, agent_spec, attempts)?;
-        if v.ok() {
+        if v.ok() && v.slower() {
+            ui::warn(format!("{id}: right, but slower in Rust per call; {}", slower_hint()));
+        } else if v.ok() {
             enable(root, Some(id), false)?;
             ui::ok(format!("{} now runs in Rust", ui::bold(id)));
             enabled += 1;
@@ -310,7 +320,7 @@ pub fn go(
             ));
         }
     }
-    ensure!(enabled > 0, "no port passed verification");
+    ensure!(enabled > 0, "no port both passed verification and ran faster");
     show::bench(&bench(root, runs)?);
     show::report(&report(root)?);
     Ok(())

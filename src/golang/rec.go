@@ -225,6 +225,99 @@ func fastAnythingRecVariants(v any) []any {
 	return out
 }
 
+// Non-ASCII text that ports often get wrong: an accent, CJK, an emoji with a modifier, a combining mark.
+var fastAnythingRecNonASCII = []string{"é", "日本", "👍🏽", "é"}
+
+// Inputs where ports and originals tend to part ways, of the same type as the recorded value.
+func fastAnythingRecEdges(v any) []any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return nil
+	}
+	out := []any{}
+	put := func(set func(reflect.Value)) {
+		n := reflect.New(rv.Type()).Elem()
+		set(n)
+		if !reflect.DeepEqual(n.Interface(), v) {
+			out = append(out, n.Interface())
+		}
+	}
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		for _, x := range []int64{0, 1, -1} {
+			put(func(n reflect.Value) { n.SetInt(x) })
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		for _, x := range []uint64{0, 1} {
+			put(func(n reflect.Value) { n.SetUint(x) })
+		}
+	case reflect.Float32, reflect.Float64:
+		for _, x := range []float64{0, 1, -1, 1e300, 5e-324} {
+			put(func(n reflect.Value) { n.SetFloat(x) })
+		}
+	case reflect.String:
+		s := []rune(rv.String())
+		mid := len(s) / 2
+		na := fastAnythingRecNonASCII
+		for _, x := range []string{string(s[:mid]) + na[0] + string(s[mid:]), string(s) + na[1], na[2] + string(s), string(s) + na[3], ""} {
+			put(func(n reflect.Value) { n.SetString(x) })
+		}
+	case reflect.Slice:
+		if rv.Len() == 0 {
+			break
+		}
+		out = append(out, reflect.MakeSlice(rv.Type(), 0, 0).Interface())
+		for k, e := range fastAnythingRecEdges(rv.Index(0).Interface()) {
+			if k == 4 {
+				break
+			}
+			c := fastAnythingRecCopy(rv)
+			c.Index(0).Set(reflect.ValueOf(e))
+			out = append(out, c.Interface())
+		}
+	}
+	return out
+}
+
+// A short version of a recorded value, so edge cases stay cheap when the real inputs are big.
+func fastAnythingRecSmall(v any) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return v
+	}
+	switch rv.Kind() {
+	case reflect.Slice:
+		if rv.Len() > 8 {
+			return fastAnythingRecCopy(rv.Slice(0, 8)).Interface()
+		}
+	case reflect.String:
+		if r := []rune(rv.String()); len(r) > 64 {
+			n := reflect.New(rv.Type()).Elem()
+			n.SetString(string(r[:64]))
+			return n.Interface()
+		}
+	}
+	return v
+}
+
+// The value repeated factor times (nil past 4096 items or characters).
+func fastAnythingRecBigger(v any, factor int) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() || (rv.Kind() != reflect.String && rv.Kind() != reflect.Slice) || rv.Len() == 0 || rv.Len()*factor > 4096 {
+		return nil
+	}
+	if rv.Kind() == reflect.String {
+		n := reflect.New(rv.Type()).Elem()
+		n.SetString(strings.Repeat(rv.String(), factor))
+		return n.Interface()
+	}
+	out := reflect.MakeSlice(rv.Type(), 0, rv.Len()*factor)
+	for k := 0; k < factor; k++ {
+		out = reflect.AppendSlice(out, fastAnythingRecCopy(rv))
+	}
+	return out.Interface()
+}
+
 func fastAnythingRecSave() {
 	fastAnythingRecMu.Lock()
 	defer fastAnythingRecMu.Unlock()
@@ -240,6 +333,78 @@ func fastAnythingRecSave() {
 		}()
 		return fastAnythingRecFn(a), true
 	}
+	// Edge cases first, from a sample of recorded calls: special numbers, non-ASCII text, empty and
+	// much bigger inputs. The original answers them; inputs it panics on are skipped.
+	edgeLeft := func() time.Duration { return 1500*time.Millisecond - time.Since(start) }
+	attempt := func(next []any) (time.Duration, bool) {
+		enc, err := fastAnythingRecJSON(next)
+		if err != nil || seen[enc] {
+			return 0, false
+		}
+		seen[enc] = true
+		t := time.Now()
+		r, ok := call(fastAnythingRecCopy(reflect.ValueOf(next)).Interface().([]any))
+		took := time.Since(t)
+		if !ok {
+			return 0, false
+		}
+		re, err := fastAnythingRecJSON(r)
+		if err != nil {
+			return 0, false
+		}
+		derived = append(derived, `{"args":`+enc+`,"result":`+re+`,"derived":"edge"}`)
+		return took, true
+	}
+	grown := map[int]bool{}
+	sampled := 0
+edges:
+	for _, args := range fastAnythingRecArgs {
+		if args == nil || fastAnythingRecFn == nil {
+			continue
+		}
+		if sampled++; sampled > 20 {
+			break
+		}
+		base := make([]any, len(args))
+		for i := range args {
+			base[i] = fastAnythingRecSmall(args[i])
+		}
+		for i := range args {
+			for _, e := range fastAnythingRecEdges(base[i]) {
+				if len(derived) >= 100 || edgeLeft() <= 0 {
+					break edges
+				}
+				next := fastAnythingRecCopy(reflect.ValueOf(base)).Interface().([]any)
+				next[i] = e
+				attempt(next)
+			}
+			if grown[i] || fastAnythingRecBigger(base[i], 4) == nil {
+				continue
+			}
+			// much bigger inputs, only while their time (assumed quadratic) fits the budget
+			grown[i] = true
+			t := time.Now()
+			if _, ok := call(fastAnythingRecCopy(reflect.ValueOf(base)).Interface().([]any)); !ok {
+				continue
+			}
+			took := time.Since(t)
+			// 4x bigger each step, from the short version of the input, up to 4096 items or characters
+			for _, factor := range []int{4, 16, 64, 256, 512} {
+				big := fastAnythingRecBigger(base[i], factor)
+				if big == nil || len(derived) >= 100 || took*16 > edgeLeft()/2 {
+					break
+				}
+				next := fastAnythingRecCopy(reflect.ValueOf(base)).Interface().([]any)
+				next[i] = big
+				var ok bool
+				if took, ok = attempt(next); !ok {
+					break
+				}
+			}
+		}
+	}
+	edgeCount := len(derived)
+	start = time.Now()
 outer:
 	for _, args := range fastAnythingRecArgs {
 		if args == nil || fastAnythingRecFn == nil {
@@ -247,7 +412,7 @@ outer:
 		}
 		for i := range args {
 			for _, smaller := range fastAnythingRecVariants(args[i]) {
-				if len(derived) >= 200 || time.Since(start) > 3*time.Second {
+				if len(derived) >= 200+edgeCount || time.Since(start) > 3*time.Second {
 					break outer
 				}
 				next := fastAnythingRecCopy(reflect.ValueOf(args)).Interface().([]any)

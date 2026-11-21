@@ -347,7 +347,7 @@ Only edit files in this folder. Don't touch the Python project.\n\n\
 {helpers}## Real calls\n\n\
 fast-anything recorded {recorded} real calls (out of {seen} while the app ran). A few:\n\n{fence}\n{samples}\n{fence}\n\n\
 ## Rules\n\n\
-- Same result for every input, edge cases included: empty input, zero, negatives, unicode.\n\
+- Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
 - Python `str` indexes by Unicode code point: use `.chars()` (or bytes only after checking `is_ascii()`).\n\
 - Python ints don't overflow. `i64` is fine unless the recorded values are bigger.\n\
 - Float results are compared with a relative tolerance of 1e-9. Keep the same order of operations.\n\

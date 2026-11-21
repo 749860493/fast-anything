@@ -61,6 +61,8 @@ pub struct Verify {
     pub total: usize,
     /// Of total: extra cases made by shrinking recorded inputs, answered by the original.
     pub derived: usize,
+    /// Of derived: edge cases (special numbers, non-ASCII text, empty and much bigger inputs).
+    pub edges: usize,
     pub passed: usize,
     pub failed: usize,
     pub failures: Vec<Failure>,
@@ -71,6 +73,11 @@ pub struct Verify {
 impl Verify {
     pub fn ok(&self) -> bool {
         self.built && self.total > 0 && self.failed == 0
+    }
+
+    /// Right, but slower per call than the original: the cost of crossing into Rust outweighs the work.
+    pub fn slower(&self) -> bool {
+        self.micro.is_some_and(|m| m.speedup > 0.0 && m.speedup < 1.0)
     }
 }
 
@@ -163,5 +170,20 @@ impl Ctx {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slower_only_when_measured_below_one() {
+        let v =
+            |speedup| Verify { micro: Some(Micro { original_ns: 1.0, rust_ns: 1.0, speedup }), ..Verify::default() };
+        assert!(v(0.5).slower());
+        assert!(!v(1.4).slower());
+        assert!(!v(0.0).slower(), "no measurement isn't slower");
+        assert!(!Verify::default().slower());
     }
 }

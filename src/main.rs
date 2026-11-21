@@ -145,7 +145,9 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
                 if !v.ok() {
                     bail!("{agent} couldn't get {} right in {attempts} attempts", out.id);
                 }
-                show::next(&format!("fast-anything enable {}", out.id));
+                if !v.slower() {
+                    show::next(&format!("fast-anything enable {}", out.id));
+                }
             }
             Ok(())
         }
@@ -155,7 +157,9 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
             if !v.ok() {
                 bail!("{id} doesn't match the original yet");
             }
-            show::next(&format!("fast-anything enable {id}"));
+            if !v.slower() {
+                show::next(&format!("fast-anything enable {id}"));
+            }
             Ok(())
         }
         Cmd::Enable { id, force } => {

@@ -338,11 +338,103 @@ function variants(value, rand) {
   );
 }
 
-/** Extra test cases: recorded calls with smaller inputs, answered by the original itself. */
+const NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}"];
+const BIG = 4096; // the longest "huge" input, in items or characters
+const EDGE_SAMPLE = 20;
+const EDGE_LIMIT = 100;
+const GROW = [4, 16, 64, 256, 512]; // how much bigger, step by step, than the short version of an input
+
+/** Inputs where ports and originals tend to part ways, of the same type as the recorded value. */
+function edges(v) {
+  if (typeof v === "number") {
+    return Number.isInteger(v) ? [0, 1, -1].filter((x) => x !== v) : [NaN, Infinity, -Infinity, -0, 0, 1e308, 5e-324];
+  }
+  if (typeof v === "bigint") return [0n, 1n, -1n].filter((x) => x !== v);
+  if (typeof v === "string") {
+    const cs = [...v];
+    const mid = cs.length >> 1;
+    return [cs.slice(0, mid).join("") + NON_ASCII[0] + cs.slice(mid).join(""), v + NON_ASCII[1], NON_ASCII[2] + v, v + NON_ASCII[3], ""];
+  }
+  if (Array.isArray(v) && v.length) return [[], ...edges(v[0]).slice(0, 4).map((e) => [e, ...v.slice(1)])];
+  return [];
+}
+
+/** A short version of a recorded value, so edge cases stay cheap when the real inputs are big. */
+function small(v) {
+  if (Array.isArray(v)) return v.slice(0, 8);
+  if (typeof v === "string") return [...v].slice(0, 64).join("");
+  return v;
+}
+
+/** The value repeated factor times (null past BIG items or characters). */
+function bigger(v, factor) {
+  if (!(typeof v === "string" || Array.isArray(v)) || !v.length || v.length * factor > BIG) return null;
+  return typeof v === "string" ? v.repeat(factor) : Array.from({ length: factor }, () => v).flat(1);
+}
+
+/** Edge cases from a sample of recorded calls: special numbers, non-ASCII text, empty and much bigger
+ *  inputs. The original answers them; inputs it rejects are skipped. */
+function deriveEdges(original, cases, budget, limit) {
+  const derived = [];
+  const seen = new Set();
+  const start = performance.now();
+  const left = () => budget - (performance.now() - start) / 1000;
+  const attempt = (args) => {
+    let encoded;
+    let took;
+    try {
+      encoded = { args: args.map(enc) };
+      const key = JSON.stringify(encoded);
+      if (seen.has(key)) return null;
+      seen.add(key);
+      const t = performance.now();
+      const r = original(...structuredClone(args));
+      took = (performance.now() - t) / 1000;
+      encoded.result = enc(r);
+    } catch {
+      return null; // outside the function's domain: not a fair test
+    }
+    encoded.derived = "edge";
+    derived.push(encoded);
+    return took;
+  };
+  const grown = new Set();
+  for (const c of cases.filter((c) => !("raises" in c)).slice(0, EDGE_SAMPLE)) {
+    const args = dec(c.args);
+    const base = args.map(small);
+    for (let i = 0; i < args.length; i++) {
+      for (const e of edges(base[i])) {
+        if (derived.length >= limit || left() <= 0) return derived;
+        attempt(base.map((a, j) => (j === i ? e : a)));
+      }
+      if (grown.has(i) || bigger(base[i], 4) === null) continue;
+      // much bigger inputs, only while their time (assumed quadratic) fits the budget
+      grown.add(i);
+      let took;
+      try {
+        const t = performance.now();
+        original(...structuredClone(base));
+        took = (performance.now() - t) / 1000;
+      } catch {
+        continue;
+      }
+      for (const factor of GROW) {
+        const big = bigger(base[i], factor);
+        if (big === null || derived.length >= limit || took * 16 > left() / 2) break;
+        took = attempt(base.map((a, j) => (j === i ? big : a)));
+        if (took === null) break;
+      }
+    }
+  }
+  return derived;
+}
+
+/** Extra test cases: edge cases, then recorded calls with smaller inputs, answered by the original. */
 function derive(original, cases, budget, limit) {
   let seed = 0xfa57;
   const rand = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
-  const derived = [];
+  const derived = deriveEdges(original, cases, budget / 2, EDGE_LIMIT);
+  limit += derived.length;
   const seen = new Set();
   const start = performance.now();
   for (const c of cases) {
@@ -421,7 +513,7 @@ async function verify(job) {
   const recorded = cases.length;
   const derived = typeof original === "function" ? derive(original, cases, job.derive_budget ?? 3, job.derive_limit ?? 200) : [];
   cases.push(...derived);
-  const report = { total: cases.length, derived: derived.length, passed: 0, failed: 0, failures: [] };
+  const report = { total: cases.length, derived: derived.length, edges: derived.filter((c) => c.derived === "edge").length, passed: 0, failed: 0, failures: [] };
   const calls = [];
   cases.forEach((c, i) => {
     const args = dec(c.args);
@@ -448,7 +540,7 @@ async function verify(job) {
     if (report.failures.length < 8)
       report.failures.push({
         case: i,
-        call: (c.derived ? "(derived) " : "") + job.func + "(" + args.map((a) => show(a, 80)).join(", ") + ")",
+        call: (c.derived === "edge" ? "(edge) " : c.derived ? "(derived) " : "") + job.func + "(" + args.map((a) => show(a, 80)).join(", ") + ")",
         expected,
         got: err === null ? show(got) : "threw " + (err?.name ?? "Error") + ": " + show(String(err?.message ?? err), 200),
       });
