@@ -23,6 +23,12 @@ pub fn relative(from: &Path, to: &Path) -> PathBuf {
     out
 }
 
+/// "python3" from "python3", "/usr/bin/python3" or "C:\\Python\\python.exe", on any OS.
+pub fn program_stem(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
+}
+
 pub fn forward_slashes(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }

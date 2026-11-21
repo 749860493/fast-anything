@@ -18,7 +18,7 @@ const RECORDER: &str = include_str!("ruby/recorder.rb");
 const GUARDS: &[&str] = &["if__FILE__==$0", "if$0==__FILE__", "if__FILE__==$PROGRAM_NAME", "if$PROGRAM_NAME==__FILE__"];
 
 pub fn is_ruby(program: &str) -> bool {
-    let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let stem = crate::util::program_stem(program);
     stem == "ruby"
 }
 

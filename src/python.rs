@@ -16,7 +16,7 @@ const PYO3: &str = "0.30";
 pub const DISABLE_ENV: &str = "FAST_ANYTHING_DISABLE";
 
 pub fn is_python(program: &str) -> bool {
-    let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let stem = crate::util::program_stem(program);
     stem == "py" || stem.starts_with("python") || stem.starts_with("pypy")
 }
 

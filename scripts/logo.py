@@ -156,6 +156,63 @@ def wordmark(width, height, logo_size, title_size, tagline=None, bg=True):
     return img
 
 
+def badge(d, x, y, label, value, color, f):
+    """A shields.io-style badge; returns its width."""
+    pad, h = 10, 30
+    lw = d.textlength(label, font=f) + pad * 2
+    vw = d.textlength(value, font=f) + pad * 2
+    d.rounded_rectangle([x, y, x + lw + vw, y + h], radius=5, fill=(85, 85, 85))
+    d.rounded_rectangle([x + lw, y, x + lw + vw, y + h], radius=5, fill=color)
+    d.rectangle([x + lw, y, x + lw + 6, y + h], fill=color)
+    d.text((x + pad, y + h / 2), label, font=f, fill=(255, 255, 255), anchor="lm")
+    d.text((x + lw + pad, y + h / 2), value, font=f, fill=(255, 255, 255), anchor="lm")
+    return lw + vw
+
+
+def post_card(width=1200, height=720):
+    img = Image.new("RGBA", (width, height), (13, 17, 23, 255))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([24, 24, width - 24, height - 24], radius=28, fill=(22, 27, 34), outline=(48, 54, 61), width=2)
+    logo = mark(150)
+    img.alpha_composite(logo, ((width - 150) // 2, 64))
+    title = font(["segoeuib.ttf", "arialbd.ttf"], 82)
+    italic = font(["segoeuii.ttf", "ariali.ttf"], 30)
+    body = font(["segoeui.ttf", "arial.ttf"], 22)
+    small = font(["segoeui.ttf", "arial.ttf"], 18)
+    bold = font(["segoeuib.ttf", "arialbd.ttf"], 24)
+    w_fast = d.textlength("fast", font=title)
+    w_any = d.textlength("-anything", font=title)
+    x = (width - w_fast - w_any) / 2
+    d.text((x, 278), "fast", font=title, fill=(240, 246, 252), anchor="lm")
+    d.text((x + w_fast, 278), "-anything", font=title, fill=(255, 128, 32), anchor="lm")
+    d.line([(150, 340), (width - 150, 340)], fill=(48, 54, 61), width=2)
+    d.text((width / 2, 382), "Don't rewrite it in Rust. Rewrite the 5% that's slow.", font=italic, fill=(230, 237, 243), anchor="mm")
+    d.text((width / 2, 422), "Python, Node, TypeScript and Ruby · only the hot loop · checked against real calls", font=body, fill=(139, 148, 158), anchor="mm")
+    badges = [("version", "0.1.0", (247, 114, 0)), ("languages", "4", (247, 114, 0)), ("works with", "any agent", (247, 114, 0)),
+              ("tests", "passing", (46, 160, 67)), ("license", "MIT", (247, 114, 0))]
+    widths = [d.textlength(l, font=small) + d.textlength(v, font=small) + 40 for l, v, _ in badges]
+    x = (width - sum(widths) - 12 * (len(badges) - 1)) / 2
+    for (label, value, color), w in zip(badges, widths):
+        badge(d, x, 462, label, value, color, small)
+        x += w + 12
+    stats = [("up to ", False), ("116× faster", True), (" · ", False), ("27/27", True), (" calls replayed · ", False),
+             ("0", True), (" mismatches · one command", False)]
+    total = sum(d.textlength(t, font=bold if b else body) for t, b in stats)
+    x = (width - total) / 2
+    for text, is_bold in stats:
+        f = bold if is_bold else body
+        d.text((x, 545), text, font=f, fill=(240, 246, 252), anchor="lm")
+        x += d.textlength(text, font=f)
+    link = "github.com/EL4CTEO/fast-anything"
+    rest = "  ·  Python · Node · TypeScript · Ruby  ·  npm i -g @el4cteo/fast-anything"
+    total = d.textlength(link + rest, font=small)
+    x = (width - total) / 2
+    d.text((x, 600), link, font=small, fill=(88, 166, 255), anchor="lm")
+    d.line([(x, 612), (x + d.textlength(link, font=small), 612)], fill=(88, 166, 255), width=1)
+    d.text((x + d.textlength(link, font=small), 600), rest, font=small, fill=(139, 148, 158), anchor="lm")
+    return img.convert("RGB")
+
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     mark(1024).save(OUT / "logo.png")
@@ -163,4 +220,5 @@ if __name__ == "__main__":
     mark(1024, background=False).resize((512, 512), Image.LANCZOS).save(OUT / "mark.png")
     wordmark(1600, 400, 260, 150, bg=False).save(OUT / "wordmark.png")
     wordmark(1280, 640, 250, 128, tagline="Don't rewrite it in Rust. Rewrite the 5% that's slow.").convert("RGB").save(OUT / "social.png")
+    post_card().save(OUT / "post-card.png")
     print("ok")

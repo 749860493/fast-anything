@@ -16,7 +16,7 @@ const RUNNER: &str = include_str!("node/runner.mjs");
 const RECORDER: &str = include_str!("node/recorder.cjs");
 
 pub fn is_node(program: &str) -> bool {
-    let stem = Path::new(program).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let stem = crate::util::program_stem(program);
     stem == "node" || stem == "nodejs"
 }
 
