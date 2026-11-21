@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - PHP (8.1+): apps run as `php app.php`. Profiled with a one-line timer per function for one run, parsed with PHP's tokenizer, ports called through the FFI extension.
 
