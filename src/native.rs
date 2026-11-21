@@ -397,6 +397,9 @@ pub fn same(a: &Value, b: &Value, loose_empty: bool) -> bool {
         }
         (Value::Null, Value::Array(v)) | (Value::Array(v), Value::Null) => loose_empty && v.is_empty(),
         (Value::Null, Value::Object(v)) | (Value::Object(v), Value::Null) => loose_empty && v.is_empty(),
+        (Value::Array(a), Value::Object(o)) | (Value::Object(o), Value::Array(a)) => {
+            loose_empty && a.is_empty() && o.is_empty()
+        }
         _ => a == b,
     }
 }

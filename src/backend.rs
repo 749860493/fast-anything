@@ -4,7 +4,7 @@
 use crate::hotspot::Hotspot;
 use crate::state::{Ctx, Port, Verify};
 use crate::util::{output, tail};
-use crate::{golang, java, node, python, ruby};
+use crate::{golang, java, node, php, python, ruby};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -20,6 +20,7 @@ pub enum Lang {
     Ruby,
     Java,
     Go,
+    Php,
 }
 
 #[derive(Deserialize)]
@@ -49,16 +50,18 @@ impl Lang {
             Ok(Lang::Java)
         } else if golang::is_go(program) {
             Ok(Lang::Go)
+        } else if php::is_php(program) {
+            Ok(Lang::Php)
         } else {
             bail!(
-                "fast-anything speaks Python, Node.js (JavaScript/TypeScript), Ruby, Java and Go. Start the command with one of them:\n    fast-anything scan -- python app.py\n    fast-anything scan -- node app.js\n    fast-anything scan -- ruby app.rb\n    fast-anything scan -- java App.java\n    fast-anything scan -- go run ."
+                "fast-anything speaks Python, Node.js (JavaScript/TypeScript), Ruby, Java, Go and PHP. Start the command with one of them:\n    fast-anything scan -- python app.py\n    fast-anything scan -- node app.js\n    fast-anything scan -- ruby app.rb\n    fast-anything scan -- java App.java\n    fast-anything scan -- go run .\n    fast-anything scan -- php app.php"
             )
         }
     }
 
     /// Ports called through the C entry point, with the port in src/port.rs.
     pub fn c_bridge(self) -> bool {
-        matches!(self, Lang::Ruby | Lang::Java | Lang::Go)
+        matches!(self, Lang::Ruby | Lang::Java | Lang::Go | Lang::Php)
     }
 
     pub fn label(self) -> &'static str {
@@ -68,6 +71,7 @@ impl Lang {
             Lang::Ruby => "Ruby",
             Lang::Java => "Java",
             Lang::Go => "Go",
+            Lang::Php => "PHP",
         }
     }
 
@@ -78,6 +82,7 @@ impl Lang {
             Lang::Ruby => ruby::resolve(program, root),
             Lang::Java => java::resolve(program, root),
             Lang::Go => golang::resolve(program, root),
+            Lang::Php => php::resolve(program, root),
         }
     }
 
@@ -88,6 +93,7 @@ impl Lang {
             Lang::Ruby => ruby::profile(ctx, exe, args),
             Lang::Java => java::profile(ctx, exe, args),
             Lang::Go => golang::profile(ctx, exe, args),
+            Lang::Php => php::profile(ctx, exe, args),
         }
     }
 
@@ -106,6 +112,7 @@ impl Lang {
             Lang::Ruby => ruby::record(ctx, exe, args, hs, out, limit),
             Lang::Java => java::record(ctx, exe, args, hs, out, limit),
             Lang::Go => golang::record(ctx, exe, args, hs, out, limit),
+            Lang::Php => php::record(ctx, exe, args, hs, out, limit),
         }
     }
 
@@ -116,6 +123,7 @@ impl Lang {
             Lang::Ruby => ruby::scaffold(ctx, hs, helpers, port),
             Lang::Java => java::scaffold(ctx, hs, helpers, port),
             Lang::Go => golang::scaffold(ctx, hs, helpers, port),
+            Lang::Php => php::scaffold(ctx, hs, helpers, port),
         }
     }
 
@@ -126,6 +134,7 @@ impl Lang {
             Lang::Ruby => ruby::verify(ctx, port),
             Lang::Java => java::verify(ctx, port),
             Lang::Go => golang::verify(ctx, port),
+            Lang::Php => php::verify(ctx, port),
         }
     }
 
@@ -136,6 +145,7 @@ impl Lang {
             Lang::Ruby => ruby::enable(ctx, port),
             Lang::Java => java::enable(ctx, port),
             Lang::Go => golang::enable(ctx, port),
+            Lang::Php => php::enable(ctx, port),
         }
     }
 
@@ -146,6 +156,7 @@ impl Lang {
             Lang::Ruby => ruby::disable(ctx, port),
             Lang::Java => java::disable(ctx, port),
             Lang::Go => golang::disable(ctx, port),
+            Lang::Php => php::disable(ctx, port),
         }
     }
 
@@ -172,7 +183,7 @@ impl Lang {
             Lang::Python => format!("{ext}.abi3.so"),
             Lang::Node => format!("{ext}.node"),
             // loaded through a C FFI (Fiddle, FFM, ...): the platform's own library name
-            Lang::Ruby | Lang::Java | Lang::Go => built.clone(),
+            Lang::Ruby | Lang::Java | Lang::Go | Lang::Php => built.clone(),
         };
         (built, dest)
     }

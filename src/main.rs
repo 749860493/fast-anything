@@ -10,6 +10,7 @@ mod java;
 mod mcp;
 mod native;
 mod node;
+mod php;
 mod pipeline;
 mod python;
 mod report;

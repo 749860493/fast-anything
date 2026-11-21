@@ -34,6 +34,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "25"
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: ffi
       - uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -110,4 +114,18 @@ jobs:
           $fa bench --runs 2
           $fa disable
           git diff --exit-code fuzzy.go main.go
+          test -z "$(git status --porcelain .)"
+      - name: end to end, PHP
+        working-directory: examples/fuzzy-dedupe-php
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- php app.php
+          $fa port
+          cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
+          $fa verify
+          $fa enable
+          php app.php
+          $fa bench --runs 2
+          $fa disable
+          git diff --exit-code fuzzy.php
           test -z "$(git status --porcelain .)"

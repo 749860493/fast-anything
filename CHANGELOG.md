@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- PHP (8.1+): apps run as `php app.php`. Profiled with a one-line timer per function for one run, parsed with PHP's tokenizer, ports called through the FFI extension.
+
 ## 0.2.0
 
 - Java (22+): apps run as `java App.java`. Profiled with Flight Recorder, parsed with javac's own parser, ports called through the FFM API.
