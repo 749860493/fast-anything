@@ -170,8 +170,6 @@ const TYPED_ARRAYS: &[&str] = &[
     "Int8Array",
     "Uint8Array",
     "Uint8ClampedArray",
-    "BigInt64Array",
-    "BigUint64Array",
 ];
 
 /// Rust type for a TypeScript annotation, if there's an obvious one.
@@ -203,7 +201,6 @@ pub fn rust_type(annotation: &str) -> Option<String> {
                 .or_else(|| a.strip_prefix("Array<").and_then(|x| x.strip_suffix('>')).map(String::from))
                 .or_else(|| a.strip_prefix("ReadonlyArray<").and_then(|x| x.strip_suffix('>')).map(String::from));
             let set_inner = a.strip_prefix("Set<").and_then(|x| x.strip_suffix('>'));
-            let map_inner = a.strip_prefix("Map<string,").and_then(|x| x.strip_suffix('>'));
             let tuple = a
                 .strip_prefix('[')
                 .and_then(|x| x.strip_suffix(']'))
@@ -217,10 +214,12 @@ pub fn rust_type(annotation: &str) -> Option<String> {
             } else if let Some(inner) = inner {
                 format!("Vec<{}>", rust_type(&inner)?)
             } else if let Some(inner) = set_inner {
-                format!("std::collections::HashSet<{}>", rust_type(inner.trim())?)
-            } else if let Some(inner) = map_inner {
-                format!("std::collections::HashMap<String, {}>", rust_type(inner.trim())?)
+                // napi converts a JS Set into a HashSet, whose items must hash: strings yes, f64 no
+                let inner = rust_type(inner.trim()).filter(|t| t == "String")?;
+                format!("std::collections::HashSet<{inner}>")
             } else {
+                // a JS Map would arrive empty (napi's HashMap reads a plain object's own keys), so
+                // only Record<string, T> maps to one
                 let v = a.strip_prefix("Record<string,").and_then(|x| x.strip_suffix('>'))?;
                 format!("std::collections::HashMap<String, {}>", rust_type(v.trim())?)
             }
@@ -568,11 +567,11 @@ mod tests {
         assert_eq!(rust_type("string | null").as_deref(), Some("Option<String>"));
         assert_eq!(rust_type("Float64Array").as_deref(), Some("Float64Array"));
         assert_eq!(rust_type("Uint8ClampedArray").as_deref(), Some("Uint8ClampedArray"));
-        assert_eq!(rust_type("BigInt64Array").as_deref(), Some("BigInt64Array"));
-        assert_eq!(rust_type("BigUint64Array").as_deref(), Some("BigUint64Array"));
+        assert_eq!(rust_type("BigInt64Array"), None);
         assert_eq!(rust_type("Buffer").as_deref(), Some("Buffer"));
-        assert_eq!(rust_type("Set<number>").as_deref(), Some("std::collections::HashSet<f64>"));
-        assert_eq!(rust_type("Map<string, number>").as_deref(), Some("std::collections::HashMap<String, f64>"));
+        assert_eq!(rust_type("Set<string>").as_deref(), Some("std::collections::HashSet<String>"));
+        assert_eq!(rust_type("Set<number>"), None);
+        assert_eq!(rust_type("Map<string, number>"), None);
         assert_eq!(rust_type("Record<string, number>").as_deref(), Some("std::collections::HashMap<String, f64>"));
         assert_eq!(rust_type("string | number"), None);
         assert_eq!(rust_type("[number, number][]").as_deref(), Some("Vec<Vec<f64>>"));
