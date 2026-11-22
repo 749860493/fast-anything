@@ -165,6 +165,11 @@ pub fn bench(b: &BenchResult) {
         rust(bold(format!("{} faster", times(b.speedup)))),
         dim(format!("(median of {}, ±{})", b.runs, secs(b.after.stddev.max(b.before.stddev))))
     ));
+    if let Some(diff) = &b.output_diff {
+        ui::warn(format!(
+            "the app printed something else with the Rust ports ({diff}). Fine if its output varies from run to run; otherwise a port behaves differently from the original"
+        ));
+    }
 }
 
 pub fn report(r: &ReportOut) {

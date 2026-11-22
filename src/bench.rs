@@ -44,11 +44,15 @@ pub struct BenchResult {
     pub before: Stats,
     pub after: Stats,
     pub speedup: f64,
+    /// First line where the app's output with the Rust ports differs from the original's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_diff: Option<String>,
 }
 
-fn time_once(ctx: &Ctx, python: &str, args: &[String], original: bool) -> Result<f64> {
+/// One run of the app: how long it took and what it printed.
+fn time_once(ctx: &Ctx, python: &str, args: &[String], original: bool) -> Result<(f64, Vec<u8>)> {
     let mut cmd = Command::new(python);
-    cmd.args(args).current_dir(&ctx.root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    cmd.args(args).current_dir(&ctx.root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if original {
         cmd.env(DISABLE_ENV, "1");
     } else {
@@ -64,7 +68,31 @@ fn time_once(ctx: &Ctx, python: &str, args: &[String], original: bool) -> Result
         if original { ctx.state.lang.label() } else { "Rust" },
         util::tail(&String::from_utf8_lossy(&out.stderr), 20)
     );
-    Ok(took)
+    Ok((took, out.stdout))
+}
+
+/// The first line that differs between two outputs, if any.
+pub fn first_difference(original: &[u8], rust: &[u8]) -> Option<String> {
+    if original == rust {
+        return None;
+    }
+    let (a, b) = (String::from_utf8_lossy(original), String::from_utf8_lossy(rust));
+    let (mut a_lines, mut b_lines) = (a.lines(), b.lines());
+    for n in 1.. {
+        match (a_lines.next(), b_lines.next()) {
+            (Some(x), Some(y)) if x == y => continue,
+            (None, None) => return Some("the outputs differ only in line endings or a final newline".into()),
+            (x, y) => {
+                let clip = |l: Option<&str>| match l {
+                    None => "(no line)".to_string(),
+                    Some(l) if l.chars().count() > 80 => format!("{}…", l.chars().take(79).collect::<String>()),
+                    Some(l) => l.to_string(),
+                };
+                return Some(format!("line {n}: {:?} became {:?}", clip(x), clip(y)));
+            }
+        }
+    }
+    unreachable!()
 }
 
 pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
@@ -79,26 +107,37 @@ pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
         ui::bold(ctx.state.command.join(" ")),
         ctx.state.lang.label()
     ));
-    time_once(ctx, python, args, true)?;
-    time_once(ctx, python, args, false)?;
+    // the warm-up runs double as a check that the ports don't change what the app prints
+    let (_, original_out) = time_once(ctx, python, args, true)?;
+    let (_, rust_out) = time_once(ctx, python, args, false)?;
+    let output_diff = first_difference(&original_out, &rust_out);
     let (mut before, mut after) = (Vec::with_capacity(runs), Vec::with_capacity(runs));
     for i in 0..runs {
         if i % 2 == 0 {
-            before.push(time_once(ctx, python, args, true)?);
-            after.push(time_once(ctx, python, args, false)?);
+            before.push(time_once(ctx, python, args, true)?.0);
+            after.push(time_once(ctx, python, args, false)?.0);
         } else {
-            after.push(time_once(ctx, python, args, false)?);
-            before.push(time_once(ctx, python, args, true)?);
+            after.push(time_once(ctx, python, args, false)?.0);
+            before.push(time_once(ctx, python, args, true)?.0);
         }
     }
     let (before, after) = (Stats::of(&before), Stats::of(&after));
     let speedup = if after.median > 0.0 { before.median / after.median } else { 0.0 };
-    Ok(BenchResult { lang: ctx.state.lang, command: ctx.state.command.clone(), runs, ports, before, after, speedup })
+    Ok(BenchResult {
+        lang: ctx.state.lang,
+        command: ctx.state.command.clone(),
+        runs,
+        ports,
+        before,
+        after,
+        speedup,
+        output_diff,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Stats;
+    use super::{Stats, first_difference};
 
     #[test]
     fn stats() {
@@ -108,5 +147,13 @@ mod tests {
         assert_eq!(s.max, 10.0);
         assert_eq!(s.mean, 4.0);
         assert_eq!(Stats::of(&[5.0]).median, 5.0);
+    }
+
+    #[test]
+    fn output_difference() {
+        assert_eq!(first_difference(b"a\nb\n", b"a\nb\n"), None);
+        assert_eq!(first_difference(b"a\n1.0\n", b"a\n1\n").as_deref(), Some(r#"line 2: "1.0" became "1""#));
+        assert_eq!(first_difference(b"a\nb\n", b"a\n").as_deref(), Some(r#"line 2: "b" became "(no line)""#));
+        assert!(first_difference(b"a\r\n", b"a\n").unwrap().contains("line endings"));
     }
 }
