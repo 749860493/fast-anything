@@ -159,7 +159,7 @@ function describe(file, line0, name, entry, root) {
   if (kind === "function" && m[4]) blockers.push("async");
   if (kind === "function" && m[5]) blockers.push("generator (function*)");
   if (kind === "binding" && m[5]) blockers.push("async");
-  if (kind === "binding" && m[3] === "const") blockers.push("declared with const, write it as function " + name + "(...) to port it");
+  if (kind === "binding" && m[3] === "const") warnings.push("declared with const, it's declared with let while the port is switched on");
 
   const after = close + 1;
   const sig = src.slice(after, after + 400).match(/^\s*:\s*([^{=]+?)\s*(\{|=>)/);

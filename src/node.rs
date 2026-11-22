@@ -99,7 +99,8 @@ pub fn record(ctx: &Ctx, node: &str, args: &[String], hs: &Hotspot, out: &Path, 
 
     let f = &hs.name;
     let wrap = format!("{f} = globalThis.__fastAnythingWrap ? globalThis.__fastAnythingWrap({f}) : {f};");
-    fs::write(&file, backend::append_marked(&original, "//", &format!("recording {}", hs.id), &wrap))?;
+    let reassignable = redeclare(&original, "const", "let", f).unwrap_or_else(|| original.clone());
+    fs::write(&file, backend::append_marked(&reassignable, "//", &format!("recording {}", hs.id), &wrap))?;
     let recorder = ctx.fast.join("recorder.cjs");
     fs::write(&recorder, RECORDER)?;
     let meta = out.with_extension("meta.json");
@@ -453,14 +454,62 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         rel = format!("./{rel}");
     }
     let block = shim(port, &rel, is_esm(&ctx.root, &file));
-    fs::write(&file, backend::append_marked(&text, "//", &port.id, &block))
-        .with_context(|| format!("writing {}", port.file))
+    fs::write(&file, with_shim(&text, port, &block)).with_context(|| format!("writing {}", port.file))
 }
 
 pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
     let file = ctx.root.join(&port.file);
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
-    fs::write(&file, backend::strip_marked(&text, "//", &port.id)).with_context(|| format!("writing {}", port.file))
+    fs::write(&file, without_shim(&text, port)).with_context(|| format!("writing {}", port.file))
+}
+
+/// Byte offset of the keyword in the top-level `[export] <keyword> <name>` declaration, if any.
+/// A module can declare a name only once at the top level, so there's at most one.
+fn declaration(text: &str, keyword: &str, name: &str) -> Option<usize> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let mut rest = line;
+        if let Some(r) = rest.strip_prefix("export").filter(|r| r.starts_with([' ', '\t'])) {
+            rest = r.trim_start();
+        }
+        let at = offset + line.len() - rest.len();
+        if let Some(r) = rest.strip_prefix(keyword).filter(|r| r.starts_with([' ', '\t']))
+            && r.trim_start().strip_prefix(name).is_some_and(|r| !r.starts_with(ident))
+        {
+            return Some(at);
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// The text with the declaration of name switched from one keyword to another (const <-> let).
+fn redeclare(text: &str, from: &str, to: &str, name: &str) -> Option<String> {
+    let at = declaration(text, from, name)?;
+    Some(format!("{}{to}{}", &text[..at], &text[at + from.len()..]))
+}
+
+/// A const can't be reassigned, so a function declared with const is declared with let while
+/// fast-anything swaps it; this note in the block tells disable to put the const back.
+fn let_note(name: &str) -> String {
+    format!("// fast-anything declared {name} with let instead of const above; disable puts the const back.")
+}
+
+fn with_shim(text: &str, port: &Port, block: &str) -> String {
+    let note = let_note(&port.func);
+    let (text, swapped) = match redeclare(text, "const", "let", &port.func) {
+        Some(t) => (t, true),
+        None => (text.to_string(), text.contains(&note)), // already swapped by an earlier enable
+    };
+    let block = if swapped { format!("{block}\n{note}") } else { block.to_string() };
+    backend::append_marked(&text, "//", &port.id, &block)
+}
+
+fn without_shim(text: &str, port: &Port) -> String {
+    let swapped = text.contains(&let_note(&port.func));
+    let text = backend::strip_marked(text, "//", &port.id);
+    if swapped { redeclare(&text, "let", "const", &port.func).unwrap_or(text) } else { text }
 }
 
 #[cfg(test)]
@@ -491,6 +540,41 @@ mod tests {
         assert!(is_node("node") && is_node("/usr/bin/node") && is_node("C:\\nodejs\\node.exe") && !is_node("python"));
         assert_eq!(snake("editDistance"), "edit_distance");
         assert_eq!(snake("type"), "r#type");
+    }
+
+    #[test]
+    fn const_functions_switch_to_let_and_back() {
+        let port = Port {
+            id: "lib.pairs".into(),
+            file: "lib.ts".into(),
+            module: "lib".into(),
+            func: "pairs".into(),
+            ext: "fa_lib_pairs".into(),
+            crate_dir: ".fast/ports/lib.pairs".into(),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: backend::Lang::Node,
+            owner: None,
+            line: 1,
+        };
+        for original in [
+            "export const pairs = (names: string[]): number => {\n  return 0;\n};\n",
+            "const pairs = function (names) {\n  return 0;\n};\nmodule.exports = { pairs };\n",
+            "const pairsCount = 1;\nexport  const\tpairs = (n) => n;\r\n",
+        ] {
+            let on = with_shim(original, &port, "pairs = rust.pairs;");
+            assert!(declaration(&on, "let", "pairs").is_some() && declaration(&on, "const", "pairs").is_none(), "{on}");
+            assert_eq!(on.contains("const pairsCount"), original.contains("const pairsCount"), "{on}");
+            assert_eq!(with_shim(&on, &port, "pairs = rust.pairs;"), on, "enabling twice changes nothing");
+            assert_eq!(without_shim(&on, &port), original);
+        }
+        // a function that was declared with let stays let
+        let original = "let pairs = (n) => n;\n";
+        let on = with_shim(original, &port, "pairs = rust.pairs;");
+        assert!(!on.contains("puts the const back"));
+        assert_eq!(without_shim(&on, &port), original);
     }
 
     #[test]
