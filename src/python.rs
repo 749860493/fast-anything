@@ -543,8 +543,10 @@ mod tests {
 
     #[test]
     fn renders_python_values() {
-        let v: Value =
-            serde_json::from_str(r#"[null, true, "a", {"$bytes": "aGVsbG8="}, {"$tuple": [1, 2]}, {"$dict": [["k", 1.5]]}]"#).unwrap();
+        let v: Value = serde_json::from_str(
+            r#"[null, true, "a", {"$bytes": "aGVsbG8="}, {"$tuple": [1, 2]}, {"$dict": [["k", 1.5]]}]"#,
+        )
+        .unwrap();
         assert_eq!(
             py_value(&v),
             r#"[None, True, "a", __import__('base64').b64decode("aGVsbG8="), (1, 2), {"k": 1.5}]"#
