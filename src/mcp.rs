@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 const PROTOCOL: &str = "2025-06-18";
 
-const INSTRUCTIONS: &str = "fast-anything speeds up Python, Node.js, Ruby, Java, Go, PHP, C and C++ apps by porting their hottest pure functions to Rust (PyO3 / napi-rs / a C ABI bridge) \
+const INSTRUCTIONS: &str = "fast-anything speeds up Python, Node.js, Ruby, Java, Go, PHP, C, C++ and C# apps by porting their hottest pure functions to Rust (PyO3 / napi-rs / a C ABI bridge) \
 and proving the port gives the same results on real recorded calls. Loop: fast_scan -> fast_port -> write src/lib.rs \
 following the returned task -> fast_verify (repeat until it passes) -> fast_enable -> fast_bench -> fast_report.";
 

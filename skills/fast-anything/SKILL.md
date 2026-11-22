@@ -1,6 +1,6 @@
 ---
 name: fast-anything
-description: Speed up a slow Python, Node.js/TypeScript, Ruby, Java, Go, PHP, C or C++ app by porting its hottest pure functions to Rust and proving each port gives the same results on real recorded calls. Use when the user wants their Python code faster, asks about hot paths or profiling, or says "rewrite the slow part in Rust".
+description: Speed up a slow Python, Node.js/TypeScript, Ruby, Java, Go, PHP, C, C++ or C# app by porting its hottest pure functions to Rust and proving each port gives the same results on real recorded calls. Use when the user wants their Python code faster, asks about hot paths or profiling, or says "rewrite the slow part in Rust".
 ---
 
 # fast-anything
@@ -15,7 +15,7 @@ The `fast-anything` CLI measures, records, builds, checks and swaps. You write t
    Skip anything under 2% of the run: porting it can't make a visible difference.
 2. **Port**: `fast-anything port <id>`. It re-runs the app, records up to 500 real calls, and creates
    `.fast/ports/<id>/` with a stub `src/lib.rs` and a `TASK.md`. Read TASK.md fully.
-3. **Write the Rust** in `src/lib.rs` (Ruby, Java, Go, PHP, C, C++: `src/port.rs`; `src/lib.rs` there is generated glue):
+3. **Write the Rust** in `src/lib.rs` (Ruby, Java, Go, PHP, C, C++, C#: `src/port.rs`; `src/lib.rs` there is generated glue):
    - Same semantics: Unicode code points (`.chars()`; JavaScript compares UTF-16 units), integer ranges, float operation order, error cases.
    - Fast: borrow, no needless allocation, ASCII fast paths, `with_capacity`.
    - Keep the function and module names. Run `cargo check` in the crate.

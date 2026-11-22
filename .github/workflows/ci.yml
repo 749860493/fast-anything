@@ -42,6 +42,9 @@ jobs:
         with:
           go-version: stable
           cache: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
       - uses: gradle/actions/setup-gradle@v6
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
@@ -157,6 +160,20 @@ jobs:
           $fa bench --runs 2
           $fa disable
           git diff --exit-code src
+      - name: end to end, C#
+        working-directory: examples/fuzzy-dedupe-cs
+        run: |
+          fa=../../target/release/fast-anything
+          $fa scan -- dotnet run -c Release
+          $fa port
+          cp reference/port.rs .fast/ports/$(ls .fast/ports)/src/port.rs
+          $fa verify
+          $fa enable
+          dotnet run -c Release
+          $fa bench --runs 2
+          $fa disable
+          git diff --exit-code Fuzzy.cs
+          test -z "$(git status --porcelain .)"
       - name: end to end, C
         working-directory: examples/mandelbrot-c
         run: |

@@ -1,5 +1,5 @@
 //! The bridge shared by every language that calls its port through a C entry point (Ruby, Go,
-//! PHP, Java): the crate (JSON in, JSON out), the replay check, temporary edits that always get
+//! PHP, Java, C#): the crate (JSON in, JSON out), the replay check, temporary edits that always get
 //! undone, and the blocks fast-anything puts inside a function's body.
 //!
 //! Go, PHP and Java record differently from Python and Node: a few lines at the top of the hot

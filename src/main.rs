@@ -4,6 +4,7 @@ mod agent;
 mod backend;
 mod bench;
 mod cfamily;
+mod csharp;
 mod doctor;
 mod golang;
 mod hotspot;
