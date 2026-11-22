@@ -154,6 +154,9 @@ const TYPED_ARRAYS: &[&str] = &[
     "Uint16Array",
     "Int8Array",
     "Uint8Array",
+    "Uint8ClampedArray",
+    "BigInt64Array",
+    "BigUint64Array",
 ];
 
 /// Rust type for a TypeScript annotation, if there's an obvious one.
@@ -176,6 +179,7 @@ pub fn rust_type(annotation: &str) -> Option<String> {
         "string" => "String".into(),
         "boolean" => "bool".into(),
         "void" | "undefined" => "()".into(),
+        "Buffer" => "Buffer".into(),
         t if TYPED_ARRAYS.contains(&t) => t.into(),
         _ => {
             let inner = a
@@ -183,6 +187,8 @@ pub fn rust_type(annotation: &str) -> Option<String> {
                 .map(|x| x.trim_start_matches("readonly ").to_string())
                 .or_else(|| a.strip_prefix("Array<").and_then(|x| x.strip_suffix('>')).map(String::from))
                 .or_else(|| a.strip_prefix("ReadonlyArray<").and_then(|x| x.strip_suffix('>')).map(String::from));
+            let set_inner = a.strip_prefix("Set<").and_then(|x| x.strip_suffix('>'));
+            let map_inner = a.strip_prefix("Map<string,").and_then(|x| x.strip_suffix('>'));
             let tuple = a
                 .strip_prefix('[')
                 .and_then(|x| x.strip_suffix(']'))
@@ -195,6 +201,10 @@ pub fn rust_type(annotation: &str) -> Option<String> {
                 format!("Vec<{}>", parts[0])
             } else if let Some(inner) = inner {
                 format!("Vec<{}>", rust_type(&inner)?)
+            } else if let Some(inner) = set_inner {
+                format!("std::collections::HashSet<{}>", rust_type(inner.trim())?)
+            } else if let Some(inner) = map_inner {
+                format!("std::collections::HashMap<String, {}>", rust_type(inner.trim())?)
             } else {
                 let v = a.strip_prefix("Record<string,").and_then(|x| x.strip_suffix('>'))?;
                 format!("std::collections::HashMap<String, {}>", rust_type(v.trim())?)
@@ -288,6 +298,15 @@ fn js_value(v: &Value) -> String {
             Some((tag, x)) if tag == "$float" => x.as_str().unwrap_or("NaN").to_string(),
             Some((tag, Value::Array(items))) if tag == "$set" => {
                 format!("Set {{{}}}", items.iter().map(js_value).collect::<Vec<_>>().join(", "))
+            }
+            Some((tag, Value::Array(pairs))) if tag == "$map" => {
+                let inner: Vec<String> = pairs
+                    .iter()
+                    .filter_map(|p| p.as_array())
+                    .filter(|p| p.len() == 2)
+                    .map(|p| format!("{} => {}", js_value(&p[0]), js_value(&p[1])))
+                    .collect();
+                format!("Map {{ {} }}", inner.join(", "))
             }
             _ => v.to_string(),
         },
@@ -476,6 +495,12 @@ mod tests {
         assert_eq!(rust_type("number | undefined").as_deref(), Some("Option<f64>"));
         assert_eq!(rust_type("string | null").as_deref(), Some("Option<String>"));
         assert_eq!(rust_type("Float64Array").as_deref(), Some("Float64Array"));
+        assert_eq!(rust_type("Uint8ClampedArray").as_deref(), Some("Uint8ClampedArray"));
+        assert_eq!(rust_type("BigInt64Array").as_deref(), Some("BigInt64Array"));
+        assert_eq!(rust_type("BigUint64Array").as_deref(), Some("BigUint64Array"));
+        assert_eq!(rust_type("Buffer").as_deref(), Some("Buffer"));
+        assert_eq!(rust_type("Set<number>").as_deref(), Some("std::collections::HashSet<f64>"));
+        assert_eq!(rust_type("Map<string, number>").as_deref(), Some("std::collections::HashMap<String, f64>"));
         assert_eq!(rust_type("Record<string, number>").as_deref(), Some("std::collections::HashMap<String, f64>"));
         assert_eq!(rust_type("string | number"), None);
         assert_eq!(rust_type("[number, number][]").as_deref(), Some("Vec<Vec<f64>>"));

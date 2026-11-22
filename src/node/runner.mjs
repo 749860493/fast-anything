@@ -356,18 +356,33 @@ function edges(v) {
     return [cs.slice(0, mid).join("") + NON_ASCII[0] + cs.slice(mid).join(""), v + NON_ASCII[1], NON_ASCII[2] + v, v + NON_ASCII[3], ""];
   }
   if (Array.isArray(v) && v.length) return [[], ...edges(v[0]).slice(0, 4).map((e) => [e, ...v.slice(1)])];
+  if (ArrayBuffer.isView(v) && !(v instanceof DataView) && v.length) {
+    const empty = new v.constructor(0);
+    const variants = edges(v[0]).slice(0, 4).map((e) => {
+      const copy = new v.constructor(v);
+      copy[0] = e;
+      return copy;
+    });
+    return [empty, ...variants];
+  }
   return [];
 }
 
 /** A short version of a recorded value, so edge cases stay cheap when the real inputs are big. */
 function small(v) {
-  if (Array.isArray(v)) return v.slice(0, 8);
+  if (Array.isArray(v) || (ArrayBuffer.isView(v) && !(v instanceof DataView))) return v.slice(0, 8);
   if (typeof v === "string") return [...v].slice(0, 64).join("");
   return v;
 }
 
 /** The value repeated factor times (null past BIG items or characters). */
 function bigger(v, factor) {
+  if (ArrayBuffer.isView(v) && !(v instanceof DataView)) {
+    if (!v.length || v.length * factor > BIG) return null;
+    const res = new v.constructor(v.length * factor);
+    for (let i = 0; i < factor; i++) res.set(v, i * v.length);
+    return res;
+  }
   if (!(typeof v === "string" || Array.isArray(v)) || !v.length || v.length * factor > BIG) return null;
   return typeof v === "string" ? v.repeat(factor) : Array.from({ length: factor }, () => v).flat(1);
 }
