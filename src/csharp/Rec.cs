@@ -22,6 +22,7 @@ static class FastAnythingRec
     static readonly List<string?> KeptArgs = new();
     static readonly List<string> Unsupported = new();
     static long Calls, Skipped, Ticks;
+    static bool Mutates;
     static Func<object?[], object?>? Fn;
     static Type[] Types = Array.Empty<Type>();
     static readonly string[] Texts = { "", "ÀÉÎõü ñ", "日本語のテキスト", "emoji 👍🏽🎉", "é́", "İ ß ǅ ΣΑΣ" };
@@ -67,6 +68,7 @@ static class FastAnythingRec
                     throw;
                 }
                 Ticks += Stopwatch.GetTimestamp() - t;
+                if (a != null && Json.Enc(args) != a) Mutates = true;
                 if (a != null)
                 {
                     try { Store(slot, "{\"args\":" + a + ",\"result\":" + Json.Enc(r) + "}", a); }
@@ -272,7 +274,7 @@ static class FastAnythingRec
             foreach (var s in Unsupported) u.Append(u.Length > 1 ? "," : "").Append(Json.Str(s));
             double ns = Calls > 0 ? Ticks * 1e9 / Stopwatch.Frequency / Calls : 0;
             string meta = "{\"calls\":" + Calls + ",\"kept\":" + Kept.Count + ",\"skipped\":" + Skipped + ",\"unsupported\":" + u + "]"
-                + ",\"original_ns\":" + ns.ToString("R", CultureInfo.InvariantCulture) + "}";
+                + ",\"mutates\":" + (Mutates ? "true" : "false") + ",\"original_ns\":" + ns.ToString("R", CultureInfo.InvariantCulture) + "}";
             System.IO.File.WriteAllText(Environment.GetEnvironmentVariable("FAST_ANYTHING_RECORD_META")!, meta, new UTF8Encoding(false));
         }
     }

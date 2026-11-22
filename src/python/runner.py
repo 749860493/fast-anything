@@ -411,6 +411,11 @@ def cmd_record(job, argv):
                 raise
             if case is not None:
                 try:
+                    if enc(list(args)) != case["args"] or {k: enc(v) for k, v in kwargs.items()} != case["kwargs"]:
+                        stats["mutates"] = True
+                except Unsupported:
+                    pass
+                try:
                     case["result"] = enc(result)
                     store(slot, case)
                 except Unsupported as e:
@@ -435,7 +440,7 @@ def cmd_record(job, argv):
             f.write(json.dumps(case, ensure_ascii=False) + "\n")
     with open(job["meta"], "w", encoding="utf-8") as f:
         json.dump({"calls": stats["calls"], "kept": len(kept), "skipped": stats["skipped"],
-                   "unsupported": sorted(stats["unsupported"])}, f)
+                   "unsupported": sorted(stats["unsupported"]), "mutates": stats.get("mutates", False)}, f)
 
 
 def cmd_verify(job, _argv):

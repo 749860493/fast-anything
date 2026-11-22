@@ -7,6 +7,7 @@ const meta = process.env.FAST_ANYTHING_RECORD_META;
 const limit = Number(process.env.FAST_ANYTHING_RECORD_LIMIT || 500);
 const kept = [];
 const unsupported = new Set();
+let mutates = false;
 let calls = 0;
 let skipped = 0;
 let seed = 0xfa57;
@@ -62,6 +63,9 @@ globalThis.__fastAnythingWrap = (fn) =>
     }
     if (c) {
       try {
+        if (JSON.stringify(args.map(enc)) !== JSON.stringify(c.args)) mutates = true;
+      } catch {}
+      try {
         c.result = enc(result);
         store(slot, c);
       } catch (e) {
@@ -74,5 +78,5 @@ globalThis.__fastAnythingWrap = (fn) =>
 
 process.on("exit", () => {
   fs.writeFileSync(out, kept.map((c) => JSON.stringify(c)).join("\n") + (kept.length ? "\n" : ""));
-  fs.writeFileSync(meta, JSON.stringify({ calls, kept: kept.length, skipped, unsupported: [...unsupported] }));
+  fs.writeFileSync(meta, JSON.stringify({ calls, kept: kept.length, skipped, unsupported: [...unsupported], mutates }));
 });

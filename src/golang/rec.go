@@ -28,6 +28,7 @@ var (
 	fastAnythingRecLimit  = 500
 	fastAnythingRecWhy    = map[string]bool{}
 	fastAnythingRecFn     func([]any) any
+	fastAnythingRecMutates bool
 	fastAnythingRecRng    = rand.New(rand.NewSource(0xFA57))
 )
 
@@ -63,6 +64,9 @@ func fastAnythingRec(args []any, fn func([]any) any) any {
 	r := fn(args)
 	fastAnythingRecNanos += time.Since(start).Nanoseconds()
 	if ok {
+		if after, err := fastAnythingRecJSON(args); err == nil && after != enc {
+			fastAnythingRecMutates = true
+		}
 		if re, err := fastAnythingRecJSON(r); err == nil {
 			line := `{"args":` + enc + `,"result":` + re + "}"
 			if slot < len(fastAnythingRecKept) {
@@ -446,6 +450,6 @@ outer:
 	if fastAnythingRecCalls > 0 {
 		perCall = float64(fastAnythingRecNanos) / float64(fastAnythingRecCalls)
 	}
-	meta, _ := json.Marshal(map[string]any{"calls": fastAnythingRecCalls, "kept": len(fastAnythingRecKept), "skipped": fastAnythingRecSkip, "unsupported": why, "original_ns": perCall})
+	meta, _ := json.Marshal(map[string]any{"calls": fastAnythingRecCalls, "kept": len(fastAnythingRecKept), "skipped": fastAnythingRecSkip, "unsupported": why, "original_ns": perCall, "mutates": fastAnythingRecMutates})
 	os.WriteFile(os.Getenv("FAST_ANYTHING_RECORD_META"), meta, 0o644)
 }

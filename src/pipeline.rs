@@ -85,6 +85,12 @@ pub fn port(root: &Path, id: Option<&str>, samples: usize) -> Result<PortOut> {
     ui::step(format!("running the app again to record real calls to {}", ui::bold(&hs.id)));
     let app_args = ctx.state.command[1..].to_vec();
     let rec = lang.record(&ctx, &exe, &app_args, &hs, &dir.join("recordings.jsonl"), samples.max(1))?;
+    if rec.mutates {
+        bail!(
+            "{} changes its arguments in place (seen while recording). A Rust port can only return a value, so it would drop those changes. Have the function return the new value instead, then scan again.",
+            hs.id
+        );
+    }
     if rec.kept == 0 {
         let types =
             if rec.unsupported.is_empty() { String::new() } else { format!(" (got: {})", rec.unsupported.join(", ")) };

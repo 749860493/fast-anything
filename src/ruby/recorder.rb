@@ -98,6 +98,11 @@ if ENV["FAST_ANYTHING_RECORD_OUT"]
         end
         if c
           begin
+            @mutates = true if enc(args) != c["args"]
+          rescue Unsupported
+            nil
+          end
+          begin
             c["result"] = enc(result)
             store(slot, c)
           rescue Unsupported => e
@@ -110,7 +115,7 @@ if ENV["FAST_ANYTHING_RECORD_OUT"]
       def save
         File.write(ENV.fetch("FAST_ANYTHING_RECORD_OUT"), @kept.map { |c| JSON.generate(c) + "\n" }.join)
         File.write(ENV.fetch("FAST_ANYTHING_RECORD_META"),
-                   JSON.generate({ "calls" => @calls, "kept" => @kept.length, "skipped" => @skipped, "unsupported" => @unsupported.keys }))
+                   JSON.generate({ "calls" => @calls, "kept" => @kept.length, "skipped" => @skipped, "unsupported" => @unsupported.keys, "mutates" => @mutates || false }))
       end
     end
   end

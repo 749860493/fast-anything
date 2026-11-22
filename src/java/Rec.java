@@ -8,6 +8,7 @@ final class FastAnythingRec {
     static final java.util.List<Object[]> keptArgs = new java.util.ArrayList<>();
     static final java.util.Set<String> unsupported = new java.util.LinkedHashSet<>();
     static long calls, skipped, nanos;
+    static boolean mutates;
     static java.util.function.Function<Object[], Object> fn;
 
     static {
@@ -42,6 +43,11 @@ final class FastAnythingRec {
             }
             nanos += System.nanoTime() - t;
             if (a != null) {
+                try {
+                    if (!Json.enc(args).equals(a)) mutates = true;
+                } catch (Json.Unsupported e) {
+                    // seen before the call: can't happen
+                }
                 try {
                     store(slot, "{\"args\":" + a + ",\"result\":" + Json.enc(r) + "}", copy);
                 } catch (Json.Unsupported e) {
@@ -144,7 +150,7 @@ final class FastAnythingRec {
             java.nio.file.Files.writeString(java.nio.file.Path.of(System.getenv("FAST_ANYTHING_RECORD_OUT")), b, java.nio.charset.StandardCharsets.UTF_8);
             StringBuilder u = new StringBuilder("[");
             for (String s : unsupported) u.append(u.length() > 1 ? "," : "").append(Json.str(s));
-            String meta = "{\"calls\":" + calls + ",\"kept\":" + kept.size() + ",\"skipped\":" + skipped + ",\"unsupported\":" + u + "]"
+            String meta = "{\"calls\":" + calls + ",\"kept\":" + kept.size() + ",\"skipped\":" + skipped + ",\"unsupported\":" + u + "],\"mutates\":" + mutates
                 + ",\"original_ns\":" + (calls > 0 ? (double) nanos / calls : 0) + "}";
             java.nio.file.Files.writeString(java.nio.file.Path.of(System.getenv("FAST_ANYTHING_RECORD_META")), meta, java.nio.charset.StandardCharsets.UTF_8);
         } catch (java.io.IOException e) {
