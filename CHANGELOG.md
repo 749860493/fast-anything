@@ -4,6 +4,7 @@
 
 - C# / .NET 8+: `fast-anything scan -- dotnet run -c Release`. Profiled with the runtime's own EventPipe sampler (nothing to install), sources read with Roslyn, ports called through NativeLibrary. Static methods taking numbers, strings, arrays, lists and string-keyed dictionaries; verify adds edge cases and shrunk inputs. Thanks @JuggyBob for the request (#3).
 - `port` refuses functions that change their arguments in place (seen while recording): a port only returns a value, so verify could pass a port that drops those changes (#4).
+- Python: parameters with non-literal defaults and keyword-only parameters get valid PyO3 signatures (#5, thanks @mohitmishra786); TASK.md shows an empty set as `set()` (#7).
 - Ports rebuild about 4× faster after each edit (no LTO, parallel codegen; no measurable runtime cost).
 
 ## 0.5.1
