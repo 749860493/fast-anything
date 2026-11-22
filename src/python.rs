@@ -601,6 +601,29 @@ mod tests {
     }
 
     #[test]
+    fn verify_tells_ints_from_floats() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let runner = std::env::temp_dir().join(format!("fa-runner-test-{}.py", std::process::id()));
+        fs::write(&runner, RUNNER).unwrap();
+        let check = "import runpy, sys\n\
+                     same = runpy.run_path(sys.argv[1])['same']\n\
+                     assert not same(3.0, 3) and not same(3, 3.0)\n\
+                     assert not same([1.5, 2.0], [1.5, 2])\n\
+                     assert not same({'k': 2.0}, {'k': 2})\n\
+                     assert same(3.0, 3.0 + 1e-12) and same(3, 3) and same((1.0, 2), [1.0, 2])\n\
+                     assert same(float('nan'), float('nan')) and not same(True, 1)\n";
+        let out = Command::new(python).args(["-I", "-c", check]).arg(&runner).output().unwrap();
+        let _ = fs::remove_file(&runner);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
     fn spots_python() {
         assert!(is_python("python"));
         assert!(is_python("python3.12"));

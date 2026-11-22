@@ -72,11 +72,12 @@ def dec(v):
 
 
 def same(a, b):
-    """Equality the way a caller would see it: list == tuple, floats within 1e-9."""
+    """Equality the way a caller would see it: list == tuple, floats within 1e-9, but 3 != 3.0
+    (it prints differently)."""
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     if isinstance(a, float) or isinstance(b, float):
-        if not (isinstance(a, (int, float)) and isinstance(b, (int, float))):
+        if not (isinstance(a, float) and isinstance(b, float)):
             return False
         if math.isnan(a) or math.isnan(b):
             return math.isnan(a) and math.isnan(b)
