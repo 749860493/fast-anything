@@ -232,7 +232,7 @@ function projectRelative(root, file) {
 
 function profile(job) {
   const names = readdirSync(job.dir).filter((f) => f.endsWith(".cpuprofile"));
-  if (!names.length) throw new Error("node wrote no .cpuprofile");
+  if (!names.length) throw new Error("the runtime wrote no .cpuprofile (Bun and Deno need a version with --cpu-prof)");
   // one profile per thread (worker_threads) and process: add them all up. The run took as long as
   // the longest one, the main thread's.
   const key = (n) => `${n.callFrame.url}:${n.callFrame.lineNumber}:${n.callFrame.columnNumber}:${n.callFrame.functionName}`;
