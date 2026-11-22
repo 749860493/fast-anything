@@ -395,7 +395,16 @@ pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
         "addon": ctx.lib_dir().join(format!("{}.node", port.ext)), "js_name": port.func, "func": port.func,
         "module_file": ctx.root.join(&port.file), "cases": dir.join("recordings.jsonl"), "out": out, "budget": 0.5,
     });
-    runner(ctx, node, "verify", job)?;
+    // The original may not be exported: a block appended for this run hands it to the runner from
+    // inside the module, then the file goes back byte for byte.
+    let file = ctx.root.join(&port.file);
+    let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
+    let hand_over = format!("if (globalThis.__fastAnythingOriginal) globalThis.__fastAnythingOriginal({});", port.func);
+    let mut patches = crate::native::Patches::new(ctx)?;
+    patches.write(&file, &backend::append_marked(&text, "//", &format!("verifying {}", port.id), &hand_over))?;
+    let run = runner(ctx, node, "verify", job);
+    patches.restore()?;
+    run?;
     let mut v: Verify = serde_json::from_str(&fs::read_to_string(&out)?).context("reading verify results")?;
     v.built = true;
     Ok(v)

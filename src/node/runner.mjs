@@ -504,9 +504,13 @@ async function verify(job) {
   const fast = createRequire(import.meta.url)(job.addon)[job.js_name];
   if (typeof fast !== "function") throw new Error(job.addon + " doesn't export " + job.js_name);
   let original = null;
+  let handed = null; // from a block fast-anything appended to the module, so unexported functions work too
+  globalThis.__fastAnythingOriginal = (fn) => {
+    handed = fn;
+  };
   try {
     const mod = await import(pathToFileURL(job.module_file).href);
-    original = mod[job.func] ?? mod.default?.[job.func] ?? null;
+    original = handed ?? mod[job.func] ?? mod.default?.[job.func] ?? null;
   } catch {}
 
   const cases = readFileSync(job.cases, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
