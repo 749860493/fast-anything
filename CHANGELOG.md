@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Python: verify tells ints from floats (#9); `@staticmethod`s can be ported (#13).
+- Node.js: verify checks functions that aren't exported (#15); entry-script functions port when the main code sits under `if (import.meta.main)` or `require.main === module` (#17); `const` functions port (declared with `let` while enabled, put back on disable) (#19); typed-array edge cases, `Uint8ClampedArray`, `Buffer` and `Set<string>` (#22). Thanks @mohitmishra786 and @ashp15205.
+- `bench` warns when the app prints something else with the Rust ports (#11).
+- C/C++: Intel oneAPI compilers (`icx`, `icpx`, `dpcpp`); `-fsycl` builds profile host code only (#21, thanks @Asahi-Prv).
+
 ## 0.6.0
 
 - C# / .NET 8+: `fast-anything scan -- dotnet run -c Release`. Profiled with the runtime's own EventPipe sampler (nothing to install), sources read with Roslyn, ports called through NativeLibrary. Static methods taking numbers, strings, arrays, lists and string-keyed dictionaries; verify adds edge cases and shrunk inputs. Thanks @JuggyBob for the request (#3).

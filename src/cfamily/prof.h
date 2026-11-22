@@ -10,5 +10,10 @@ void fa_prof_exit(fa_prof_frame *f);
 #ifdef __cplusplus
 }
 #endif
+#if defined(__SYCL_DEVICE_ONLY__)
+/* SYCL device code (icpx -fsycl): the device pass can't call host functions, and kernels run on the device anyway */
+#define FA_PROF(id)
+#else
 #define FA_PROF(id) __attribute__((cleanup(fa_prof_exit))) fa_prof_frame fa_prof_frame_ = fa_prof_enter(id)
+#endif
 #endif

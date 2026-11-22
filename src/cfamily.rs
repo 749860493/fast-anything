@@ -24,8 +24,9 @@ const REC_C: &str = include_str!("cfamily/rec.c");
 const REC_HPP: &str = include_str!("cfamily/rec.hpp");
 const JSON_HPP: &str = include_str!("cfamily/json.hpp");
 
-const C_COMPILERS: &[&str] = &["gcc", "clang", "cc"];
-const CPP_COMPILERS: &[&str] = &["g++", "clang++", "c++"];
+/// Intel oneAPI: icx (C, clang-based), icpx and dpcpp (C++). icx-cl takes MSVC-style flags, so it isn't listed.
+const C_COMPILERS: &[&str] = &["gcc", "clang", "cc", "icx"];
+const CPP_COMPILERS: &[&str] = &["g++", "clang++", "c++", "icpx", "dpcpp"];
 const C_EXT: &[&str] = &["c"];
 const CPP_EXT: &[&str] = &["cc", "cpp", "cxx", "c++", "C"];
 /// Compiler flags whose value is the next argument.
@@ -1387,6 +1388,10 @@ mod tests {
     #[test]
     fn finds_c_and_cpp_functions() {
         let c = "#include <stdio.h>\n/* a { comment */\nstatic int lev(const char *a, const char *b) {\n  return 0;\n}\n\nlong count(const int *xs, size_t n, int max)\n{\n  if (n) { return 1; }\n  printf(\"{\");\n  return 0;\n}\nint main(void) { return lev(\"a\", \"b\"); }\n";
+        assert_eq!(detect("icpx"), Some(Lang::Cpp));
+        assert_eq!(detect("C:\\oneAPI\\bin\\dpcpp.exe"), Some(Lang::Cpp));
+        assert_eq!(detect("icx"), Some(Lang::C));
+        assert_eq!(detect("icx-cl"), None);
         let f = parse(c);
         assert_eq!(f.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["lev", "count", "main"]);
         assert_eq!(f[0].ret, "int");

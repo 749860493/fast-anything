@@ -55,8 +55,10 @@ pub fn run() -> Result<()> {
         },
         Check {
             name: "clang",
-            found: version("clang", &["--version"]).or_else(|| version("gcc", &["--version"])),
-            need: "for C/C++ apps (or gcc)",
+            found: version("clang", &["--version"])
+                .or_else(|| version("gcc", &["--version"]))
+                .or_else(|| version("icpx", &["--version"])),
+            need: "for C/C++ apps (or gcc, icpx)",
             hint: "https://llvm.org",
         },
         Check {
