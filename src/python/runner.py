@@ -240,8 +240,11 @@ def describe(path, line, name, entry, base):
         blockers.append("lives in the entry script, which runs on import: put that code under if __name__ == '__main__'")
     elif module == "__main__" and node.lineno > guard:
         blockers.append("defined inside the if __name__ == '__main__' block")
-    if kind == "method":
-        blockers.append("method (v0.1 ports module-level functions)")
+    owner = None
+    if kind == "method" and any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list):
+        owner = qualname.rsplit(".", 1)[0]
+    elif kind == "method":
+        blockers.append("method (module-level functions and @staticmethods only for now)")
     elif kind == "nested":
         blockers.append("nested function")
     if isinstance(node, ast.AsyncFunctionDef):
@@ -308,6 +311,7 @@ def describe(path, line, name, entry, base):
         "qualname": qualname,
         "module": module,
         "kind": kind,
+        "owner": owner,
         "end_line": node.end_lineno,
         "params": params,
         "returns": returns,
@@ -432,7 +436,9 @@ def cmd_record(job, argv):
         builtins.__fast_anything_wrap__ = wrap
     else:
         module = importlib.import_module(job["module"])
-        setattr(module, job["func"], wrap(getattr(module, job["func"])))
+        owner = getattr(module, job["owner"]) if job.get("owner") else module
+        wrapped = wrap(getattr(owner, job["func"]))
+        setattr(owner, job["func"], staticmethod(wrapped) if job.get("owner") else wrapped)
     run_target(kind, target, rest)
 
     with open(job["out"], "w", encoding="utf-8") as f:
@@ -454,9 +460,10 @@ def cmd_verify(job, _argv):
         entry = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = entry
         spec.loader.exec_module(entry)
-        original = getattr(entry, job["func"])
+        module = entry
     else:
-        original = getattr(importlib.import_module(job["module"]), job["func"])
+        module = importlib.import_module(job["module"])
+    original = getattr(getattr(module, job["owner"]) if job.get("owner") else module, job["func"])
 
     with open(job["cases"], encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]

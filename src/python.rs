@@ -92,7 +92,7 @@ pub fn record(
 ) -> Result<Recording> {
     let module = hs.module.as_deref().context("this function can't be imported")?;
     let meta = out.with_extension("meta.json");
-    let job = json!({ "module": module, "func": hs.name, "out": out, "meta": meta, "limit": limit });
+    let job = json!({ "module": module, "func": hs.name, "owner": hs.owner, "out": out, "meta": meta, "limit": limit });
     if module != "__main__" {
         helper(ctx, python, "record", job, app_args)?;
     } else {
@@ -104,8 +104,13 @@ pub fn record(
         fs::create_dir_all(&backup_dir)?;
         let backup = backup_dir.join(crate::util::slug(&hs.file));
         fs::write(&backup, &original)?;
-        let f = &hs.name;
-        let wrap = format!("try:\n    {f} = __fast_anything_wrap__({f})\nexcept NameError:\n    pass");
+        let wrap = match hs.owner.as_deref() {
+            Some(cls) => format!(
+                "try:\n    {cls}.{f} = staticmethod(__fast_anything_wrap__({cls}.{f}))\nexcept NameError:\n    pass",
+                f = hs.name
+            ),
+            None => format!("try:\n    {f} = __fast_anything_wrap__({f})\nexcept NameError:\n    pass", f = hs.name),
+        };
         fs::write(&file, backend::insert_marked(&original, "#", &format!("recording {}", hs.id), &wrap, main_guard))?;
         let run = helper(ctx, python, "record", job, app_args);
         fs::write(&file, &original)
@@ -437,7 +442,7 @@ pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
     let job = json!({
         "base": ctx.base_dir(), "libdir": ctx.lib_dir(), "ext": port.ext, "module": port.module,
         "module_file": ctx.root.join(&port.file),
-        "func": port.func, "cases": dir.join("recordings.jsonl"), "out": out, "budget": 0.5,
+        "func": port.func, "owner": port.owner, "cases": dir.join("recordings.jsonl"), "out": out, "budget": 0.5,
     });
     helper(ctx, python, "verify", job, &[])?;
     let mut v: Verify = serde_json::from_str(&fs::read_to_string(&out)?).context("reading verify results")?;
@@ -465,7 +470,10 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
         "    except ImportError:",
         "        return None",
         &format!("    return {f}"),
-        &format!("{f} = _fast_anything_load() or {f}"),
+        &match port.owner.as_deref() {
+            Some(cls) => format!("{cls}.{f} = staticmethod(_fast_anything_load() or {cls}.{f})"),
+            None => format!("{f} = _fast_anything_load() or {f}"),
+        },
         "del _fast_anything_load",
     ]
     .join("\n")
@@ -532,6 +540,44 @@ mod tests {
                 assert_eq!(off, original);
             }
         }
+    }
+
+    #[test]
+    fn shim_for_a_static_method() {
+        let port = Port { owner: Some("Text".into()), ..port() };
+        let on = add_shim("class Text:\n    pass\n", &port, ".fast/lib");
+        assert!(on.contains("Text.levenshtein = staticmethod(_fast_anything_load() or Text.levenshtein)"), "{on}");
+        assert_eq!(strip_shim(&on, "fuzzy.levenshtein"), "class Text:\n    pass\n");
+    }
+
+    #[test]
+    fn static_methods_are_portable() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fa-static-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner.py"), RUNNER).unwrap();
+        fs::write(
+            dir.join("text.py"),
+            "class Text:\n    @staticmethod\n    def lev(a: str, b: str) -> int:\n        return 0\n\n    def size(self) -> int:\n        return 0\n",
+        )
+        .unwrap();
+        let check = "import runpy, sys, os\n\
+                     d = sys.argv[1]\n\
+                     describe = runpy.run_path(os.path.join(d, 'runner.py'))['describe']\n\
+                     f = os.path.join(d, 'text.py')\n\
+                     info = describe(f, 3, 'lev', None, d)\n\
+                     assert info['owner'] == 'Text' and info['blockers'] == [], info\n\
+                     info = describe(f, 6, 'size', None, d)\n\
+                     assert info['owner'] is None and info['blockers'], info\n";
+        let out = Command::new(python).args(["-I", "-c", check]).arg(&dir).output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub struct Hotspot {
     /// and saves a Python/JS -> Rust crossing per call.
     pub covered_by: Option<String>,
     /// Ruby: the module (or Object) whose method this is, as a Ruby expression.
+    /// Python: the class of a @staticmethod.
     pub owner: Option<String>,
 }
 
