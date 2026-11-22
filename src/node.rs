@@ -87,6 +87,19 @@ pub fn profile(ctx: &Ctx, node: &str, args: &[String]) -> Result<Profile> {
     serde_json::from_str(&fs::read_to_string(&result)?).context("reading the profile")
 }
 
+/// The entry script's main block, if its main code sits under one.
+const MAIN_GUARD: &[&str] = &["if(import.meta.main)", "if(require.main===module)", "if(module===require.main)"];
+
+/// Add a marked block to a module: at the end, or in the entry script just before its main block,
+/// so the app's main code already sees it. Function declarations are hoisted, so they exist there.
+fn add_marked(text: &str, id: &str, body: &str, entry: bool) -> String {
+    if entry {
+        backend::insert_marked(text, "//", id, body, |t| backend::line_starting(t, MAIN_GUARD))
+    } else {
+        backend::append_marked(text, "//", id, body)
+    }
+}
+
 /// Re-run the app with a recorder wrapped around the function. The module gets a temporary
 /// block appended (a copy waits in .fast/backup) and is restored byte for byte afterwards.
 pub fn record(ctx: &Ctx, node: &str, args: &[String], hs: &Hotspot, out: &Path, limit: usize) -> Result<Recording> {
@@ -99,7 +112,8 @@ pub fn record(ctx: &Ctx, node: &str, args: &[String], hs: &Hotspot, out: &Path, 
 
     let f = &hs.name;
     let wrap = format!("{f} = globalThis.__fastAnythingWrap ? globalThis.__fastAnythingWrap({f}) : {f};");
-    fs::write(&file, backend::append_marked(&original, "//", &format!("recording {}", hs.id), &wrap))?;
+    let entry = hs.module.as_deref() == Some("__main__");
+    fs::write(&file, add_marked(&original, &format!("recording {}", hs.id), &wrap, entry))?;
     let recorder = ctx.fast.join("recorder.cjs");
     fs::write(&recorder, RECORDER)?;
     let meta = out.with_extension("meta.json");
@@ -462,7 +476,7 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         rel = format!("./{rel}");
     }
     let block = shim(port, &rel, is_esm(&ctx.root, &file));
-    fs::write(&file, backend::append_marked(&text, "//", &port.id, &block))
+    fs::write(&file, add_marked(&text, &port.id, &block, port.module == "__main__"))
         .with_context(|| format!("writing {}", port.file))
 }
 
@@ -500,6 +514,19 @@ mod tests {
         assert!(is_node("node") && is_node("/usr/bin/node") && is_node("C:\\nodejs\\node.exe") && !is_node("python"));
         assert_eq!(snake("editDistance"), "edit_distance");
         assert_eq!(snake("type"), "r#type");
+    }
+
+    #[test]
+    fn entry_script_blocks_go_before_the_main_block() {
+        let app = "function f(x) {\n  return x;\n}\n\nif (import.meta.main) {\n  console.log(f(1));\n}\n";
+        let on = add_marked(app, "app.mjs:f", "f = g;", true);
+        let (block, main) = (on.find("f = g;").unwrap(), on.find("if (import.meta.main)").unwrap());
+        assert!(block < main, "{on}");
+        assert_eq!(backend::strip_marked(&on, "//", "app.mjs:f"), app);
+        let cjs = "function f(x) {\n  return x;\n}\nif (require.main === module) main();\n";
+        let on = add_marked(cjs, "app.js:f", "f = g;", true);
+        assert!(on.find("f = g;").unwrap() < on.find("if (require.main").unwrap(), "{on}");
+        assert!(add_marked(app, "m.f", "f = g;", false).trim_end().ends_with("// <<< fast-anything: m.f <<<"));
     }
 
     #[test]
