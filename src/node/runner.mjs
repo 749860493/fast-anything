@@ -154,7 +154,13 @@ function describe(file, line0, name, entry, root) {
   const rel = path.relative(root, file);
   const isEntry = entry && path.resolve(entry) === path.resolve(file);
   const module = isEntry ? "__main__" : rel.replace(/\.[cm]?[jt]sx?$/, "").split(path.sep).join(".");
-  if (isEntry) blockers.push("lives in the entry script, move it into a module to port it");
+  if (isEntry) {
+    // like Python's if __name__ == "__main__": the main code must not run when verify imports the script
+    const guard = code.search(/^if\s*\(\s*(import\.meta\.main|require\.main\s*===\s*module|module\s*===\s*require\.main)\s*\)/m);
+    if (guard < 0)
+      blockers.push("lives in the entry script, which runs on import: put its main code under if (import.meta.main) (or require.main === module)");
+    else if (lineStart > guard) blockers.push("defined inside or after the if (import.meta.main) block");
+  }
   if (kind === "method" || indent > 0) blockers.push("method or nested function (top-level functions only for now)");
   if (kind === "function" && m[4]) blockers.push("async");
   if (kind === "function" && m[5]) blockers.push("generator (function*)");
