@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 - Python: verify tells ints from floats (#9); `@staticmethod`s can be ported (#13).
 - Node.js: verify checks functions that aren't exported (#15); entry-script functions port when the main code sits under `if (import.meta.main)` or `require.main === module` (#17); `const` functions port (declared with `let` while enabled, put back on disable) (#19); typed-array edge cases, `Uint8ClampedArray`, `Buffer` and `Set<string>` (#22). Thanks @mohitmishra786 and @ashp15205.
