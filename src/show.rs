@@ -20,7 +20,7 @@ fn bar(share: f64, width: usize) -> String {
 fn pad(s: &str, n: usize) -> String {
     let len = s.chars().count();
     if len > n {
-        if n == 0 { String::new() } else { format!("{}…", s.chars().take(n - 1).collect::<String>()) }
+        format!("{}…", s.chars().take(n - 1).collect::<String>())
     } else {
         format!("{s}{}", " ".repeat(n - len))
     }
@@ -30,13 +30,7 @@ fn pad(s: &str, n: usize) -> String {
 /// so the function name at the end stays readable.
 fn pad_id(s: &str, n: usize) -> String {
     let len = s.chars().count();
-    if len <= n {
-        format!("{s}{}", " ".repeat(n - len))
-    } else if n == 0 {
-        String::new()
-    } else {
-        format!("…{}", s.chars().skip(len - (n - 1)).collect::<String>())
-    }
+    if len > n { format!("…{}", s.chars().skip(len - (n - 1)).collect::<String>()) } else { pad(s, n) }
 }
 
 pub fn next(cmd: &str) {
