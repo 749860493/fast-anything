@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+
+- `build` and `enable` require the Rust sources that passed verify (#67, #64).
+- `go --agent` restores the best attempt's Cargo files, `build.rs` and sources (#68, #65).
+- `disable` refuses a block with a missing marker instead of reporting success (#69, #66).
+- `scan` and `status` trim long function ids from the front, so the function name stays visible (#72, #71).
+- Python: `with multiprocessing.Pool(...)` workers are profiled and recorded on Windows (#74, #73).
+
+Thanks @Jack-mi and @Plastic-time.
+
 ## 0.8.0
 
 - R apps: `Rscript app.R`, through the C bridge and base R's `.C()`; no packages or R headers (#58).
