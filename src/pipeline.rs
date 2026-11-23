@@ -331,15 +331,9 @@ pub fn clean(root: &Path, all: bool) -> Result<()> {
     }
 
     if all {
-        match disable_all(root) {
-            Ok(disabled) => {
-                for id in disabled {
-                    ui::ok(format!("{} is back to the original code", ui::bold(&id)));
-                }
-            }
-            Err(e) => {
-                ui::warn(format!("could not disable all ports cleanly: {e:#}"));
-            }
+        let disabled = disable_all(root)?;
+        for id in disabled {
+            ui::ok(format!("{} is back to the original code", ui::bold(&id)));
         }
         if fast_dir.exists() {
             fs::remove_dir_all(&fast_dir).with_context(|| format!("removing {}", fast_dir.display()))?;
@@ -771,6 +765,20 @@ mod tests {
         // Calling clean on a non-existent .fast folder is a harmless no-op
         clean(&root, true).unwrap();
         assert!(!root.join(".fast").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clean_all_aborts_if_disable_fails_preserving_fast_dir() {
+        let (begin, _end) = backend::markers("#", "demo");
+        let text = format!("{begin}\nf = rust\n");
+        let (root, id) = enabled_project("damaged-clean", &text);
+
+        let res = clean(&root, true);
+        assert!(res.is_err(), "clean --all must abort when disable fails");
+        assert!(root.join(".fast").exists(), ".fast must not be deleted if disable fails");
+        assert!(Ctx::open(&root).unwrap().state.ports[&id].enabled);
 
         let _ = fs::remove_dir_all(root);
     }
