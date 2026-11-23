@@ -47,6 +47,67 @@ def _fast_anything_watch_workers():
 
     _bootstrap._fast_anything = True
     multiprocessing.process.BaseProcess._bootstrap = _bootstrap
+    if os.name == "nt":
+        _fast_anything_graceful_pool_terminate()
+
+
+def _fast_anything_graceful_pool_terminate():
+    """On Windows, Pool.terminate() (and `with Pool(...) as p:`) uses TerminateProcess(), which
+    kills workers before BaseProcess._bootstrap's finally block can write their profile/recordings.
+    When no tasks are still pending, close the pool and wait briefly for idle workers to exit on
+    their own, then hand off to the original terminate()."""
+    import multiprocessing.pool
+    import threading
+    import time
+
+    Pool = multiprocessing.pool.Pool
+    original = Pool.terminate
+    if getattr(original, "_fast_anything", False):
+        return
+
+    grace = 2.0  # total wall-clock cap (seconds) so terminate() never hangs on a stuck worker
+
+    def _terminate(self):
+        try:
+            pool = getattr(self, "_pool", None)
+            workers = list(pool) if pool else []
+            cache = getattr(self, "_cache", None)
+            state = getattr(self, "_state", None)
+            # Only drain when workers are processes (not ThreadPool threads) and _cache is empty.
+            # Every submitted Pool job stays in _cache until all its tasks finish, so an empty
+            # _cache guarantees no queued work will run and cause side effects after terminate().
+            if (
+                workers
+                and hasattr(workers[0], "terminate")
+                and state in (multiprocessing.pool.RUN, multiprocessing.pool.CLOSE)
+                and cache is not None
+                and not cache
+            ):
+                if state == multiprocessing.pool.RUN:
+                    self.close()
+                # Re-check after close() (which rejects new submissions) in case another thread
+                # queued work right before close() flipped _state.
+                if not cache:
+                    deadline = time.monotonic() + grace
+                    worker_handler = getattr(self, "_worker_handler", None)
+                    if (
+                        worker_handler is not None
+                        and worker_handler.is_alive()
+                        and threading.current_thread() is not worker_handler
+                    ):
+                        worker_handler.join(max(0.0, deadline - time.monotonic()))
+                    for p in list(pool):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        if p.is_alive():
+                            p.join(remaining)
+        except Exception:
+            pass
+        return original(self)
+
+    _terminate._fast_anything = True
+    Pool.terminate = _terminate
 
 
 def _fast_anything_chain():

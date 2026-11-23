@@ -1252,4 +1252,142 @@ mod tests {
         assert_eq!(sq.map(|f| f["ncalls"].clone()), Some(json!(20)), "sq ran 20 times in the workers");
         assert_eq!((meta["calls"].clone(), recorded), (json!(20), 20));
     }
+
+    #[test]
+    fn pool_context_manager_workers_are_profiled_and_recorded() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-pool-with-test-{}", std::process::id()));
+        let (hook, children) = (dir.join("hook"), dir.join("children"));
+        fs::create_dir_all(&hook).unwrap();
+        fs::create_dir_all(&children).unwrap();
+        fs::write(hook.join("sitecustomize.py"), HOOK).unwrap();
+        fs::write(dir.join("runner.py"), RUNNER).unwrap();
+        fs::write(dir.join("work.py"), "def sq(x: int) -> int:\n    return x * x\n").unwrap();
+        fs::write(
+            dir.join("app.py"),
+            "from multiprocessing import Pool\nfrom work import sq\n\nif __name__ == \"__main__\":\n\
+             \x20   with Pool(2) as pool:\n\
+             \x20       print(sum(pool.map(sq, range(20))))\n",
+        )
+        .unwrap();
+        let run = |mode: &str, job: Value| {
+            let job_path = dir.join(format!("job-{mode}.json"));
+            fs::write(&job_path, job.to_string()).unwrap();
+            let _ = fs::remove_dir_all(&children);
+            fs::create_dir_all(&children).unwrap();
+            let out = Command::new(python)
+                .args([
+                    dir.join("runner.py").as_os_str(),
+                    mode.as_ref(),
+                    job_path.as_os_str(),
+                    "--".as_ref(),
+                    "app.py".as_ref(),
+                ])
+                .current_dir(&dir)
+                .env("PYTHONPATH", &hook)
+                .env("FAST_ANYTHING_CHILDREN", &children)
+                .env("FAST_ANYTHING_RUNNER", dir.join("runner.py"))
+                .env("FAST_ANYTHING_JOB", &job_path)
+                .env("FAST_ANYTHING_MODE", mode)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        run("profile", json!({ "root": dir, "out": dir.join("profile.json"), "max": 40 }));
+        let profile: Value = serde_json::from_str(&fs::read_to_string(dir.join("profile.json")).unwrap()).unwrap();
+        let sq = profile["functions"].as_array().unwrap().iter().find(|f| f["name"] == "sq").cloned();
+        run(
+            "record",
+            json!({ "module": "work", "func": "sq", "owner": null, "limit": 500,
+                               "out": dir.join("rec.jsonl"), "meta": dir.join("rec.meta.json") }),
+        );
+        let meta: Value = serde_json::from_str(&fs::read_to_string(dir.join("rec.meta.json")).unwrap()).unwrap();
+        let recorded = fs::read_to_string(dir.join("rec.jsonl")).unwrap().lines().count();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(sq.map(|f| f["ncalls"].clone()), Some(json!(20)), "sq ran 20 times in Pool workers");
+        assert_eq!((meta["calls"].clone(), recorded), (json!(20), 20));
+    }
+
+    #[test]
+    fn pool_terminate_does_not_run_queued_tasks_or_hang() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-pool-term-test-{}", std::process::id()));
+        let (hook, children) = (dir.join("hook"), dir.join("children"));
+        fs::create_dir_all(&hook).unwrap();
+        fs::create_dir_all(&children).unwrap();
+        fs::write(hook.join("sitecustomize.py"), HOOK).unwrap();
+        fs::write(dir.join("runner.py"), RUNNER).unwrap();
+        fs::write(
+            dir.join("tasks.py"),
+            "import pathlib, time\n\n\
+             def hold(started_path: str) -> None:\n\
+             \x20   pathlib.Path(started_path).write_text('1', encoding='utf-8')\n\
+             \x20   time.sleep(30)\n\n\
+             def side_effect(marker_path: str) -> None:\n\
+             \x20   pathlib.Path(marker_path).write_text('ran', encoding='utf-8')\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app.py"),
+            "import pathlib, sys, time\nfrom multiprocessing import Pool\nfrom tasks import hold, side_effect\n\n\
+             if __name__ == \"__main__\":\n\
+             \x20   started = pathlib.Path(sys.argv[1])\n\
+             \x20   marker = pathlib.Path(sys.argv[2])\n\
+             \x20   t0 = time.monotonic()\n\
+             \x20   with Pool(1) as pool:\n\
+             \x20       pool.apply_async(hold, (str(started),))\n\
+             \x20       pool.apply_async(side_effect, (str(marker),))\n\
+             \x20       deadline = time.monotonic() + 10\n\
+             \x20       while not started.exists() and time.monotonic() < deadline:\n\
+             \x20           time.sleep(0.02)\n\
+             \x20       assert started.exists(), 'worker did not start blocking task'\n\
+             \x20   assert not marker.exists(), 'queued task ran after terminate'\n\
+             \x20   assert time.monotonic() - t0 < 10, 'terminate waited on blocked task'\n\
+             \x20   t1 = time.monotonic()\n\
+             \x20   with Pool(1, initializer=time.sleep, initargs=(30,)) as pool:\n\
+             \x20       pass\n\
+             \x20   assert time.monotonic() - t1 < 10, 'terminate hung on stuck initializer'\n",
+        )
+        .unwrap();
+        let job_path = dir.join("job-profile.json");
+        fs::write(&job_path, json!({ "root": dir, "out": dir.join("profile.json"), "max": 40 }).to_string()).unwrap();
+        let out = Command::new(python)
+            .args([
+                dir.join("runner.py").as_os_str(),
+                "profile".as_ref(),
+                job_path.as_os_str(),
+                "--".as_ref(),
+                "app.py".as_ref(),
+                dir.join("started.txt").as_os_str(),
+                dir.join("marker.txt").as_os_str(),
+            ])
+            .current_dir(&dir)
+            .env("PYTHONPATH", &hook)
+            .env("FAST_ANYTHING_CHILDREN", &children)
+            .env("FAST_ANYTHING_RUNNER", dir.join("runner.py"))
+            .env("FAST_ANYTHING_JOB", &job_path)
+            .env("FAST_ANYTHING_MODE", "profile")
+            .output()
+            .unwrap();
+        let marker_exists = dir.join("marker.txt").exists();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(!marker_exists, "queued task must not execute after terminate");
+    }
 }
