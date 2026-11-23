@@ -62,6 +62,7 @@ def _fast_anything_graceful_pool_terminate():
 
     Pool = multiprocessing.pool.Pool
     original = Pool.terminate
+    pool_close = Pool.close
     if getattr(original, "_fast_anything", False):
         return
 
@@ -74,8 +75,8 @@ def _fast_anything_graceful_pool_terminate():
             cache = getattr(self, "_cache", None)
             state = getattr(self, "_state", None)
             # Only drain when workers are processes (not ThreadPool threads) and _cache is empty.
-            # Every submitted Pool job stays in _cache until all its tasks finish, so an empty
-            # _cache guarantees no queued work will run and cause side effects after terminate().
+            # Submitted Pool jobs stay in _cache until their tasks finish, so skipping close()
+            # while _cache is non-empty prevents queued work from running after terminate().
             if (
                 workers
                 and hasattr(workers[0], "terminate")
@@ -84,7 +85,7 @@ def _fast_anything_graceful_pool_terminate():
                 and not cache
             ):
                 if state == multiprocessing.pool.RUN:
-                    self.close()
+                    pool_close(self)
                 # Re-check after close() (which rejects new submissions) in case another thread
                 # queued work right before close() flipped _state.
                 if not cache:
@@ -102,8 +103,9 @@ def _fast_anything_graceful_pool_terminate():
                             break
                         if p.is_alive():
                             p.join(remaining)
-        except Exception:
-            pass
+        except Exception as e:
+            if not sys.is_finalizing() and sys.stderr is not None:
+                sys.stderr.write("fast-anything: can't drain pool workers: %r\n" % (e,))
         return original(self)
 
     _terminate._fast_anything = True
