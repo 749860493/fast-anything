@@ -16,7 +16,7 @@ The `fast-anything` CLI measures, records, builds, checks and swaps. You write t
 2. **Port**: `fast-anything port <id>`. It re-runs the app, records up to 500 real calls, and creates
    `.fast/ports/<id>/` with a stub `src/lib.rs` and a `TASK.md`. Read TASK.md fully.
 3. **Write the Rust** in `src/lib.rs` (Ruby, Java, Go, PHP, C, C++, C#: `src/port.rs`; `src/lib.rs` there is generated glue):
-   - Same semantics: Unicode code points (`.chars()`; JavaScript compares UTF-16 units), integer ranges, float operation order, error cases.
+   - Same semantics: Unicode code points (`.chars()`; JavaScript compares UTF-16 units; Arabic harakat `U+064B..U+065F`, Tatweel `U+0640`, Eastern digits `٠-٩`, and BiDi marks `U+200C..U+200F` are distinct scalar values), integer ranges, float operation order, error cases.
    - Fast: borrow, no needless allocation, ASCII fast paths, `with_capacity`.
    - Keep the function and module names. Run `cargo check` in the crate.
 4. **Verify**: `fast-anything verify <id>` builds in release mode and replays every recorded call.

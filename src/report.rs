@@ -38,7 +38,7 @@ pub fn svg(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
   <rect width="760" height="220" rx="16" fill="#0d1117"/>
   <rect x="0.5" y="0.5" width="759" height="219" rx="15.5" fill="none" stroke="#30363d"/>
   <text x="32" y="44" font-family="{mono}" font-size="14" fill="#f74c00">⚡ fast-anything</text>
-  <text x="32" y="78" font-family="{sans}" font-size="20" fill="#e6edf3">{project}</text>
+  <text x="32" y="78" font-family="{sans}" font-size="20" fill="#e6edf3" direction="auto" unicode-bidi="plaintext">{project}</text>
   <text x="32" y="148" font-family="{sans}" font-size="64" font-weight="800" fill="#f74c00">{headline}<tspan dx="12" font-size="28" font-weight="600" fill="#e6edf3">faster</tspan></text>
   <text x="420" y="92" font-family="{sans}" font-size="13" fill="#8b949e">{original}</text>
   <text x="720" y="92" font-family="{mono}" font-size="13" fill="#e6edf3" text-anchor="end">{before}</text>
@@ -46,7 +46,7 @@ pub fn svg(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
   <text x="420" y="146" font-family="{sans}" font-size="13" fill="#8b949e">Rust</text>
   <text x="720" y="146" font-family="{mono}" font-size="13" fill="#e6edf3" text-anchor="end">{after}</text>
   <rect x="420" y="154" width="{after_w:.1}" height="16" rx="4" fill="#f74c00"/>
-  <text x="32" y="196" font-family="{sans}" font-size="13" fill="#8b949e">{detail}</text>
+  <text x="32" y="196" font-family="{sans}" font-size="13" fill="#8b949e" direction="auto" unicode-bidi="plaintext">{detail}</text>
 </svg>
 "##,
         project = xml(project),
@@ -106,5 +106,6 @@ mod tests {
         assert!(card.contains("a&lt;b&gt;&amp;c"));
         assert!(card.contains("8.0×"));
         assert!(card.contains(r#"width="37.5""#));
+        assert!(card.contains(r#"unicode-bidi="plaintext""#));
     }
 }

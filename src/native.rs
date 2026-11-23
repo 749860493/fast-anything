@@ -188,7 +188,7 @@ Only edit files in this folder. Don't touch the {label} project.\n\n\
 ## Real calls\n\n\
 fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
 ## Rules\n\n\
-- Same result for every input, edge cases included: empty input, zero, negatives, non-ASCII text, very long input. verify tests these too.\n\
+- Same result for every input, edge cases included: empty input, zero, negatives, non-ASCII and Arabic/RTL text (harakat U+064B..U+065F, Tatweel U+0640, Eastern digits ٠-٩, BiDi marks), very long input. verify tests these too.\n\
 {rules}\
 - Return `Err(message)` where the original would fail.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases. Threads are fine if the result is the same.\n\
