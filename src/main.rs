@@ -238,10 +238,7 @@ mod tests {
 
     #[test]
     fn clean_parses() {
-        assert!(matches!(
-            Cli::try_parse_from(["fast-anything", "clean"]).unwrap().cmd,
-            Cmd::Clean { all: false }
-        ));
+        assert!(matches!(Cli::try_parse_from(["fast-anything", "clean"]).unwrap().cmd, Cmd::Clean { all: false }));
         assert!(matches!(
             Cli::try_parse_from(["fast-anything", "clean", "--all"]).unwrap().cmd,
             Cmd::Clean { all: true }
