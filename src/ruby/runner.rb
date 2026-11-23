@@ -230,7 +230,7 @@ def variants(value, rng)
   end
 end
 
-NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}"].freeze
+NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}", "\u{645}\u{64f}\u{62d}\u{64e}\u{645}\u{64e}\u{651}\u{62f}\u{640}\u{661}\u{662}\u{61f}\u{200f}"].freeze
 BIG = 4096 # the longest "huge" input, in items or characters
 EDGE_SAMPLE = 20
 EDGE_LIMIT = 100
@@ -243,7 +243,7 @@ def edges(value)
   when Float then [Float::NAN, Float::INFINITY, -Float::INFINITY, -0.0, 0.0, 1e308, 5e-324]
   when String
     mid = value.length / 2
-    [value[0, mid] + NON_ASCII[0] + value[mid..], value + NON_ASCII[1], NON_ASCII[2] + value, value + NON_ASCII[3], ""]
+    [value[0, mid] + NON_ASCII[0] + value[mid..], value + NON_ASCII[1], NON_ASCII[2] + value, value + NON_ASCII[3], value + NON_ASCII[4], ""]
   when Array
     return [] if value.empty?
 

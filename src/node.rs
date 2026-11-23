@@ -444,7 +444,7 @@ Only edit files in this folder. Don't touch the JavaScript project.\n\n\
 {helpers}## Real calls\n\n\
 fast-anything recorded {recorded} real calls (out of {seen} while the app ran). A few:\n\n{fence}\n{samples}\n{fence}\n\n\
 ## Rules\n\n\
-- Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
+- Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII and Arabic/RTL text (harakat U+064B..U+065F, Tatweel U+0640, Eastern digits ٠-٩, BiDi marks), very long input. verify tests these too.\n\
 - JavaScript strings are UTF-16: `.length`, indexing and `charCodeAt` count UTF-16 code units. \
 Use `s.encode_utf16()` for anything index- or length-based (bytes are fine after checking `is_ascii()`).\n\
 - JavaScript numbers are f64. Integer math is exact only up to 2^53; use `f64` unless the values are clearly small integers.\n\

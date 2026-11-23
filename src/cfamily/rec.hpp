@@ -99,9 +99,10 @@ inline std::vector<std::string> edges(const std::string &v) {
             c++;
         }
     }
-    // an accent, CJK, an emoji with a modifier, a combining mark (UTF-8 bytes)
-    const std::string a = "\xC3\xA9", cjk = "\xE6\x97\xA5\xE6\x9C\xAC", emoji = "\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD", comb = "e\xCC\x81";
-    return {v.substr(0, mid) + a + v.substr(mid), v + cjk, emoji + v, v + comb, ""};
+    // an accent, CJK, an emoji with a modifier, a combining mark, Arabic/RTL with harakat/Tatweel/digits (UTF-8 bytes)
+    const std::string a = "\xC3\xA9", cjk = "\xE6\x97\xA5\xE6\x9C\xAC", emoji = "\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBD", comb = "e\xCC\x81",
+                      ar = "\xD9\x85\xD9\x8F\xD8\xAD\xD9\x8E\xD9\x85\xD9\x8E\xD9\x91\xD8\xAF\xD9\x80\xD9\xA1\xD9\xA2\xD8\x9F\xE2\x80\x8F";
+    return {v.substr(0, mid) + a + v.substr(mid), v + cjk, emoji + v, v + comb, v + ar, ""};
 }
 template <class T, class Al> std::vector<std::vector<T, Al>> edges(const std::vector<T, Al> &v) {
     std::vector<std::vector<T, Al>> out;

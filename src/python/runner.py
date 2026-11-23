@@ -749,7 +749,7 @@ def variants(value, rng):
     return out
 
 
-NON_ASCII = ("\u00e9", "\u65e5\u672c", "\U0001f44d\U0001f3fd", "e\u0301")
+NON_ASCII = ("\u00e9", "\u65e5\u672c", "\U0001f44d\U0001f3fd", "e\u0301", "\u0645\u064f\u062d\u064e\u0645\u064e\u0651\u062f\u0640\u0661\u0662\u061f\u200f")
 BIG = 4096  # the longest "huge" input, in items or characters
 EDGE_SAMPLE, EDGE_LIMIT = 20, 100
 GROW = (4, 16, 64, 256, 512)  # how much bigger, step by step, than the short version of an input
@@ -766,7 +766,7 @@ def edges(value):
     if isinstance(value, str):
         mid = len(value) // 2
         return [value[:mid] + NON_ASCII[0] + value[mid:], value + NON_ASCII[1], NON_ASCII[2] + value,
-                value + NON_ASCII[3], ""]
+                value + NON_ASCII[3], value + NON_ASCII[4], ""]
     if isinstance(value, bytes):
         return [b"", value + b"\x00", b"\xff" + value]
     if is_array(value):
