@@ -322,6 +322,41 @@ pub fn build_all(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove the build cache (.fast/target) or reset the entire .fast directory.
+pub fn clean(root: &Path, all: bool) -> Result<()> {
+    let fast_dir = root.join(".fast");
+    if !fast_dir.exists() {
+        ui::ok("nothing to clean (.fast folder does not exist)");
+        return Ok(());
+    }
+
+    if all {
+        match disable_all(root) {
+            Ok(disabled) => {
+                for id in disabled {
+                    ui::ok(format!("{} is back to the original code", ui::bold(&id)));
+                }
+            }
+            Err(e) => {
+                ui::warn(format!("could not disable all ports cleanly: {e:#}"));
+            }
+        }
+        if fast_dir.exists() {
+            fs::remove_dir_all(&fast_dir).with_context(|| format!("removing {}", fast_dir.display()))?;
+        }
+        ui::ok("removed .fast and reset all state");
+    } else {
+        let target_dir = fast_dir.join("target");
+        if target_dir.exists() {
+            fs::remove_dir_all(&target_dir).with_context(|| format!("removing {}", target_dir.display()))?;
+            ui::ok("removed .fast/target build cache");
+        } else {
+            ui::ok(".fast/target build cache is already clean");
+        }
+    }
+    Ok(())
+}
+
 pub fn bench(root: &Path, runs: usize) -> Result<BenchResult> {
     let mut ctx = Ctx::open(root)?;
     for p in ctx.state.ports.values().filter(|p| p.enabled && ctx.stale(p)) {
@@ -694,6 +729,49 @@ mod tests {
         disable(&root, Some(&id)).unwrap();
         assert_eq!(fs::read_to_string(root.join("app.py")).unwrap(), original);
         assert!(!Ctx::open(&root).unwrap().state.ports[&id].enabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clean_removes_target_cache() {
+        let root = std::env::temp_dir().join(format!("fa-clean-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let fast_dir = root.join(".fast");
+        let target_dir = fast_dir.join("target/release");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("artifact"), "bytes").unwrap();
+        fs::write(fast_dir.join("state.json"), "{}").unwrap();
+
+        assert!(target_dir.exists());
+        clean(&root, false).unwrap();
+        assert!(!target_dir.exists());
+        assert!(fast_dir.exists());
+
+        // Calling clean again when target is already gone is a harmless no-op
+        clean(&root, false).unwrap();
+        assert!(!target_dir.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clean_all_disables_ports_and_removes_fast_dir() {
+        let (begin, end) = backend::markers("#", "demo");
+        let original = "def f():\n    pass\n";
+        let text = format!("{original}\n{begin}\nf = rust\n{end}\n");
+        let (root, _id) = enabled_project("clean-all", &text);
+        let target_dir = root.join(".fast/target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("dummy.o"), "dummy").unwrap();
+
+        clean(&root, true).unwrap();
+        assert_eq!(fs::read_to_string(root.join("app.py")).unwrap(), original);
+        assert!(!root.join(".fast").exists());
+
+        // Calling clean on a non-existent .fast folder is a harmless no-op
+        clean(&root, true).unwrap();
+        assert!(!root.join(".fast").exists());
+
         let _ = fs::remove_dir_all(root);
     }
 }

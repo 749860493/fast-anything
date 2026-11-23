@@ -79,7 +79,7 @@ fast-anything ports the outermost loop it can, not the tiny function called insi
 ## Why not rewrite it all?
 
 - **Compile time**: each port is a one-function crate. Seconds, not minutes.
-- **Cache**: every port shares one `.fast/target`. Delete it whenever you like.
+- **Cache**: every port shares one `.fast/target`. Delete it whenever you like (`fast-anything clean`).
 - **Risk**: your code stays as it is. Rust is opt-in per function, checked against real behavior.
 
 ## Agents

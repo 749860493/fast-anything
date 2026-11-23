@@ -105,6 +105,12 @@ enum Cmd {
     },
     /// Rebuild every port (after cloning, or a toolchain upgrade)
     Build,
+    /// Remove compiler build cache (.fast/target) or all temporary state
+    Clean {
+        /// Remove all ports and reset .fast completely (disables any enabled ports first)
+        #[arg(long)]
+        all: bool,
+    },
     /// Time your app with the originals vs the Rust ports
     Bench {
         #[arg(long, default_value_t = 5)]
@@ -198,6 +204,7 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
             Ok(())
         }
         Cmd::Build => pipeline::build_all(root),
+        Cmd::Clean { all } => pipeline::clean(root, all),
         Cmd::Bench { runs } => {
             show::bench(&pipeline::bench(root, runs)?);
             show::next("fast-anything report");
@@ -227,6 +234,18 @@ mod tests {
             Cmd::Disable { all: true, id: None }
         ));
         assert!(Cli::try_parse_from(["fast-anything", "disable", "fuzzy.lev", "--all"]).is_err());
+    }
+
+    #[test]
+    fn clean_parses() {
+        assert!(matches!(
+            Cli::try_parse_from(["fast-anything", "clean"]).unwrap().cmd,
+            Cmd::Clean { all: false }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["fast-anything", "clean", "--all"]).unwrap().cmd,
+            Cmd::Clean { all: true }
+        ));
     }
 
     #[test]
