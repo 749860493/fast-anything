@@ -24,7 +24,12 @@ def _fast_anything_watch_workers():
             # instead, so the worker still leaves its results. Set first, before anything slow.
             import signal
 
-            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+            def _on_term(*_):
+                # a second SIGTERM must not cut the worker off while it writes its results
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                sys.exit(0)
+
+            signal.signal(signal.SIGTERM, _on_term)
         state = None
         try:
             state = sys.modules.get("_fast_anything_state")
