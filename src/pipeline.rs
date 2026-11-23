@@ -370,7 +370,7 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
             return Ok(v);
         }
         if v.ok() && right.as_ref().is_none_or(|(best, _)| speedup(&v) > speedup(best)) {
-            right = Some((v.clone(), snapshot(&dir.join("src"))?));
+            right = Some((v.clone(), snapshot(&dir)?));
         }
         last = Some(v);
     }
@@ -378,9 +378,9 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
         && last.as_ref().is_none_or(|v| !v.ok() || speedup(v) < speedup(&best))
     {
         ui::step(format!("putting back the right attempt of {id} ({} per call)", util::times(speedup(&best))));
-        for (path, bytes) in &files {
-            fs::write(path, bytes)?;
-        }
+        let ctx = Ctx::open(root)?;
+        let port = ctx.state.ports.get(id).with_context(|| format!("{id} isn't ported"))?;
+        restore_snapshot(&ctx.crate_dir(port), &files)?;
         let (_, v) = verify(root, Some(id))?;
         return Ok(v);
     }
@@ -391,21 +391,58 @@ fn speedup(v: &Verify) -> f64 {
     v.micro.map(|m| m.speedup).unwrap_or(0.0)
 }
 
-/// Files and their bytes, to put back later.
+/// Cargo inputs for one attempt; recordings, TASK.md and agent.log are deliberately excluded.
 type Snapshot = Vec<(PathBuf, Vec<u8>)>;
 
-/// Every file under dir.
-fn snapshot(dir: &Path) -> Result<Snapshot> {
-    let mut out = Vec::new();
+fn snapshot_files(dir: &Path, out: &mut Snapshot) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
         if path.is_dir() {
-            out.extend(snapshot(&path)?);
+            snapshot_files(&path, out)?;
         } else {
             out.push((path.clone(), fs::read(&path)?));
         }
     }
+    Ok(())
+}
+
+fn snapshot(dir: &Path) -> Result<Snapshot> {
+    let mut out = vec![];
+    for name in ["Cargo.toml", "Cargo.lock", "build.rs"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            out.push((path.clone(), fs::read(path)?));
+        }
+    }
+    let src = dir.join("src");
+    if src.is_dir() {
+        snapshot_files(&src, &mut out)?;
+    }
     Ok(out)
+}
+
+fn restore_snapshot(dir: &Path, files: &Snapshot) -> Result<()> {
+    for name in ["Cargo.lock", "build.rs"] {
+        let path = dir.join(name);
+        if !files.iter().any(|(saved, _)| saved == &path) {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            }
+        }
+    }
+    let src = dir.join("src");
+    if src.exists() {
+        fs::remove_dir_all(&src)?;
+    }
+    for (path, bytes) in files {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, bytes)?;
+    }
+    Ok(())
 }
 
 pub fn go(
@@ -547,5 +584,42 @@ mod tests {
         fs::write(root.join(&port.crate_dir).join("Cargo.toml"), "not a valid manifest\n").unwrap();
         assert!(crate_needs_verify(&ctx, &port).unwrap());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_restores_crate_inputs_without_touching_run_artifacts() {
+        let dir = std::env::temp_dir().join(format!("fa-agent-snapshot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src/nested")).unwrap();
+        fs::write(dir.join("Cargo.toml"), "best manifest\n").unwrap();
+        fs::write(dir.join("Cargo.lock"), "best lock\n").unwrap();
+        fs::write(dir.join("src/lib.rs"), "best lib\n").unwrap();
+        fs::write(dir.join("src/nested/helper.rs"), "best helper\n").unwrap();
+        for name in ["TASK.md", "recordings.jsonl", "agent.log"] {
+            fs::write(dir.join(name), "before\n").unwrap();
+        }
+        let saved = snapshot(&dir).unwrap();
+
+        fs::write(dir.join("Cargo.toml"), "later manifest\n").unwrap();
+        fs::write(dir.join("Cargo.lock"), "later lock\n").unwrap();
+        fs::write(dir.join("src/lib.rs"), "later lib\n").unwrap();
+        fs::write(dir.join("src/extra.rs"), "later extra\n").unwrap();
+        fs::write(dir.join("build.rs"), "later build script\n").unwrap();
+        fs::remove_file(dir.join("src/nested/helper.rs")).unwrap();
+        for name in ["TASK.md", "recordings.jsonl", "agent.log"] {
+            fs::write(dir.join(name), "later evidence\n").unwrap();
+        }
+
+        restore_snapshot(&dir, &saved).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("Cargo.toml")).unwrap(), "best manifest\n");
+        assert_eq!(fs::read_to_string(dir.join("Cargo.lock")).unwrap(), "best lock\n");
+        assert_eq!(fs::read_to_string(dir.join("src/lib.rs")).unwrap(), "best lib\n");
+        assert_eq!(fs::read_to_string(dir.join("src/nested/helper.rs")).unwrap(), "best helper\n");
+        assert!(!dir.join("src/extra.rs").exists());
+        assert!(!dir.join("build.rs").exists());
+        for name in ["TASK.md", "recordings.jsonl", "agent.log"] {
+            assert_eq!(fs::read_to_string(dir.join(name)).unwrap(), "later evidence\n");
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 }
