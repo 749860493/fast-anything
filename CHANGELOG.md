@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0
+
+- R apps: `Rscript app.R`, through the C bridge and base R's `.C()`; no packages or R headers (#58).
+- Kotlin/JVM: Gradle apps with sources in `src/main/kotlin` (#63).
+- Python: ports functions that take or return NumPy arrays (#49), dataclasses and NamedTuples (#47); profiles and records inside `multiprocessing` workers (#51).
+- Python verify tells tuples from lists; a `tuple[T, ...]` return stays a tuple (#60).
+- Node.js: static methods can be ported (#43).
+- An enabled port is no longer reported as stale because of its own block (#62).
+
+Thanks @mohitmishra786 and @vaibhavppandey.
+
 ## 0.7.0
 
 - JavaScript/TypeScript apps also run on Bun and Deno (#55); `doctor` checks them.
