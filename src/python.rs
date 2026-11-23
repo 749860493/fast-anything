@@ -1296,7 +1296,7 @@ mod tests {
              def sq(x: int) -> int:\n    return x * x\n\n\
              def hold(started_path: str) -> None:\n\
              \x20   pathlib.Path(started_path).write_text('1', encoding='utf-8')\n\
-             \x20   time.sleep(0.3)\n\n\
+             \x20   time.sleep(1.0)\n\n\
              def side_effect(marker_path: str) -> None:\n\
              \x20   pathlib.Path(marker_path).write_text('ran', encoding='utf-8')\n";
         let app = "import pathlib, sys, time\n\
