@@ -19,10 +19,23 @@ fn bar(share: f64, width: usize) -> String {
 
 fn pad(s: &str, n: usize) -> String {
     let len = s.chars().count();
-    if len >= n {
-        format!("{}…", s.chars().take(n - 1).collect::<String>())
+    if len > n {
+        if n == 0 { String::new() } else { format!("{}…", s.chars().take(n - 1).collect::<String>()) }
     } else {
         format!("{s}{}", " ".repeat(n - len))
+    }
+}
+
+/// Fit a function id into n columns, trimming the leading module prefix when it's too long
+/// so the function name at the end stays readable.
+fn pad_id(s: &str, n: usize) -> String {
+    let len = s.chars().count();
+    if len <= n {
+        format!("{s}{}", " ".repeat(n - len))
+    } else if n == 0 {
+        String::new()
+    } else {
+        format!("…{}", s.chars().skip(len - (n - 1)).collect::<String>())
     }
 }
 
@@ -51,7 +64,7 @@ pub fn scan(s: &ScanOut) {
         let row = format!(
             "  {:>2}  {}  {} {:>5.1}%{:>11}  {verdict}",
             i + 1,
-            pad(&h.id, 30),
+            pad_id(&h.id, 30),
             rust(bar(h.share, 9)),
             h.share * 100.0,
             if h.ncalls == 0 { "-".to_string() } else { thousands(h.ncalls) }
@@ -208,7 +221,7 @@ pub fn status(ctx: &Ctx) {
             .and_then(|v| v.micro)
             .map(|m| format!("{} per call", times(m.speedup)))
             .unwrap_or_default();
-        ui::line(format!("  {}  {}  {}", pad(&p.id, 32), state, dim(speed)));
+        ui::line(format!("  {}  {}  {}", pad_id(&p.id, 32), state, dim(speed)));
         if ctx.stale(p) {
             ui::line(format!("  {}  {}", pad("", 32), red(format!("! {} changed since it was recorded", p.file))));
         }
@@ -221,5 +234,37 @@ pub fn status(ctx: &Ctx) {
             secs(b.after.median),
             rust(bold(times(b.speedup)))
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_ids_keep_the_function_name() {
+        let a = pad_id("services.original-engines.cx-filter.decodeArchive", 30);
+        let b = pad_id("services.original-engines.cx-filter.checkHeader", 30);
+        assert_ne!(a, b);
+        assert_eq!(a.chars().count(), 30);
+        assert_eq!(b.chars().count(), 30);
+        assert!(a.starts_with('…') && a.ends_with("decodeArchive"), "{a}");
+        assert!(b.starts_with('…') && b.ends_with("checkHeader"), "{b}");
+
+        let exact = "a".repeat(30);
+        assert_eq!(pad_id(&exact, 30), exact);
+        assert_eq!(pad(&exact, 30), exact);
+
+        assert_eq!(pad_id("fuzzy.lev", 12), "fuzzy.lev   ");
+
+        let unicode = pad_id("café.résumé.naïve.über.引擎.decodeArchive", 20);
+        assert_eq!(unicode.chars().count(), 20);
+        assert!(unicode.starts_with('…') && unicode.ends_with("decodeArchive"), "{unicode}");
+
+        let status_a = pad_id("services.original-engines.cx-filter.decodeArchive", 32);
+        let status_b = pad_id("services.original-engines.cx-filter.checkHeader", 32);
+        assert_ne!(status_a, status_b);
+        assert_eq!(status_a.chars().count(), 32);
+        assert!(status_a.ends_with("decodeArchive") && status_b.ends_with("checkHeader"));
     }
 }
