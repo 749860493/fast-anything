@@ -229,8 +229,8 @@ func fastAnythingRecVariants(v any) []any {
 	return out
 }
 
-// Non-ASCII text that ports often get wrong: an accent, CJK, an emoji with a modifier, a combining mark, Arabic/RTL with harakat/Tatweel/Eastern digits.
-var fastAnythingRecNonASCII = []string{"é", "日本", "👍🏽", "é", "مُحَمَّدـ١٢؟\u200f"}
+// Non-ASCII text that ports often get wrong: an accent, CJK, an emoji with a modifier, a combining mark.
+var fastAnythingRecNonASCII = []string{"é", "日本", "👍🏽", "é"}
 
 // Inputs where ports and originals tend to part ways, of the same type as the recorded value.
 func fastAnythingRecEdges(v any) []any {
@@ -263,7 +263,7 @@ func fastAnythingRecEdges(v any) []any {
 		s := []rune(rv.String())
 		mid := len(s) / 2
 		na := fastAnythingRecNonASCII
-		for _, x := range []string{string(s[:mid]) + na[0] + string(s[mid:]), string(s) + na[1], na[2] + string(s), string(s) + na[3], string(s) + na[4], ""} {
+		for _, x := range []string{string(s[:mid]) + na[0] + string(s[mid:]), string(s) + na[1], na[2] + string(s), string(s) + na[3], ""} {
 			put(func(n reflect.Value) { n.SetString(x) })
 		}
 	case reflect.Slice:

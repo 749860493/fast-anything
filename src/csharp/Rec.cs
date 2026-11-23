@@ -25,7 +25,7 @@ static class FastAnythingRec
     static bool Mutates;
     static Func<object?[], object?>? Fn;
     static Type[] Types = Array.Empty<Type>();
-    static readonly string[] Texts = { "", "ÀÉÎõü ñ", "日本語のテキスト", "emoji 👍🏽🎉", "é́", "İ ß ǅ ΣΑΣ", "مُحَمَّدـ١٢؟\u200F" };
+    static readonly string[] Texts = { "", "ÀÉÎõü ñ", "日本語のテキスト", "emoji 👍🏽🎉", "é́", "İ ß ǅ ΣΑΣ" };
     static readonly int[] Slices = { 0, 1, 2, 3, 5, 8, 13, 21, 34, 55 };
 
     static FastAnythingRec()

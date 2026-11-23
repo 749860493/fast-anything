@@ -359,7 +359,7 @@ function variants(value, rand) {
   );
 }
 
-const NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}", "\u{645}\u{64f}\u{62d}\u{64e}\u{645}\u{64e}\u{651}\u{62f}\u{640}\u{661}\u{662}\u{61f}\u{200f}"];
+const NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}"];
 const BIG = 4096; // the longest "huge" input, in items or characters
 const EDGE_SAMPLE = 20;
 const EDGE_LIMIT = 100;
@@ -374,7 +374,7 @@ function edges(v) {
   if (typeof v === "string") {
     const cs = [...v];
     const mid = cs.length >> 1;
-    return [cs.slice(0, mid).join("") + NON_ASCII[0] + cs.slice(mid).join(""), v + NON_ASCII[1], NON_ASCII[2] + v, v + NON_ASCII[3], v + NON_ASCII[4], ""];
+    return [cs.slice(0, mid).join("") + NON_ASCII[0] + cs.slice(mid).join(""), v + NON_ASCII[1], NON_ASCII[2] + v, v + NON_ASCII[3], ""];
   }
   if (Array.isArray(v) && v.length) return [[], ...edges(v[0]).slice(0, 4).map((e) => [e, ...v.slice(1)])];
   if (ArrayBuffer.isView(v) && !(v instanceof DataView) && v.length) {

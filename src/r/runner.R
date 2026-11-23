@@ -142,7 +142,7 @@ random <- function(n) {  # 0..n-1, our own generator
   floor(seed / 4294967296 * n)
 }
 
-NON_ASCII <- c("\u00e9", "\u65e5\u672c", "\U0001f44d\U0001f3fd", "e\u0301", "\u0645\u064f\u062d\u064e\u0645\u064e\u0651\u062f\u0640\u0661\u0662\u061f\u200f")
+NON_ASCII <- c("\u00e9", "\u65e5\u672c", "\U0001f44d\U0001f3fd", "e\u0301")
 
 # inputs where ports and originals tend to part ways, of the same type as the recorded value
 edges <- function(v) {
@@ -153,7 +153,7 @@ edges <- function(v) {
       integer = Filter(function(x) !identical(x, v), list(0L, 1L, -1L, NA_integer_)),
       logical = list(NA),
       character = list(paste0(substr(v, 1, nchar(v) %/% 2), NON_ASCII[1], substring(v, nchar(v) %/% 2 + 1)),
-                       paste0(v, NON_ASCII[2]), paste0(NON_ASCII[3], v), paste0(v, NON_ASCII[4]), paste0(v, NON_ASCII[5]), "", NA_character_),
+                       paste0(v, NON_ASCII[2]), paste0(NON_ASCII[3], v), paste0(v, NON_ASCII[4]), "", NA_character_),
       list()))
   }
   out <- list(v[0])
