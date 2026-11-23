@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.5
+
+- `scan`: a function whose helper does I/O or is nondeterministic is no longer ranked portable (#75).
+- Python: I/O and randomness reached through an import alias are detected (#77); `os.environ`, `sys.argv` and the standard streams block without a call too (#78).
+
+Thanks @OnurrUgur.
+
 ## 0.8.1
 
 - `build` and `enable` require the Rust sources that passed verify (#67, #64).
