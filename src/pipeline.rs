@@ -221,6 +221,14 @@ pub fn slower_hint() -> &'static str {
     "calling into Rust costs more than this function's work, so it won't be switched on. Port its caller instead (fewer, bigger calls), or  enable --force"
 }
 
+/// Whether the crate is not exactly the one covered by the last verify. Old state without a hash
+/// keeps its legacy behavior; re-porting clears verify and therefore always needs a new one.
+fn crate_needs_verify(ctx: &Ctx, port: &Port) -> Result<bool> {
+    let Some(verify) = &port.verify else { return Ok(true) };
+    let Some(expected) = verify.source_hash.as_deref() else { return Ok(false) };
+    Ok(backend::source_hash(&ctx.crate_dir(port))? != expected)
+}
+
 pub fn enable(root: &Path, id: Option<&str>, force: bool) -> Result<String> {
     let mut ctx = Ctx::open(root)?;
     let id = ctx.resolve_port(id)?;
@@ -231,6 +239,9 @@ pub fn enable(root: &Path, id: Option<&str>, force: bool) -> Result<String> {
     let verified = port.verify.as_ref().is_some_and(Verify::ok);
     if !verified && !force {
         bail!("{id} hasn't passed verify yet: run  fast-anything verify {id}  (or --force)");
+    }
+    if !force && crate_needs_verify(&ctx, &port)? {
+        bail!("{id}'s Rust changed since it passed verify: run  fast-anything verify {id}  (or --force)");
     }
     if let Some(m) = port.verify.as_ref().filter(|v| v.slower() && !force).and_then(|v| v.micro) {
         bail!("{id} is {} slower per call in Rust: {}", util::times(1.0 / m.speedup), slower_hint());
@@ -269,14 +280,10 @@ pub fn build_all(root: &Path) -> Result<()> {
     ensure!(!ctx.state.ports.is_empty(), "nothing ported yet");
     let mut failed = 0;
     for port in ctx.state.ports.values() {
-        // An enabled port loads whatever lands in .fast/lib: only rebuild what verify checked.
-        let verified = port.verify.as_ref().and_then(|v| v.source_hash.as_deref());
-        if port.enabled
-            && verified.is_some_and(|h| backend::source_hash(&ctx.crate_dir(port)).ok().as_deref() != Some(h))
-        {
+        if port.enabled && crate_needs_verify(&ctx, port)? {
             failed += 1;
             ui::error(format!(
-                "{} is switched on and its Rust changed since it passed verify; run  fast-anything verify {}",
+                "{} is switched on and its Rust hasn't passed verify in its current state; run  fast-anything verify {}",
                 port.id, port.id
             ));
             continue;
@@ -479,5 +486,66 @@ mod tests {
         );
         let wrong = Verify { failed: 1, ..v };
         assert!(feedback(&wrong).contains("failed"));
+    }
+
+    fn project(name: &str) -> (PathBuf, Port) {
+        let root = std::env::temp_dir().join(format!("fa-pipeline-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let crate_dir = ".fast/ports/demo";
+        fs::create_dir_all(root.join(crate_dir).join("src")).unwrap();
+        fs::write(root.join(crate_dir).join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        fs::write(root.join(crate_dir).join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        fs::write(root.join("app.py"), "def f():\n    pass\n").unwrap();
+        let port = Port {
+            id: "demo".into(),
+            file: "app.py".into(),
+            module: "app".into(),
+            func: "f".into(),
+            ext: "fa_demo".into(),
+            crate_dir: crate_dir.into(),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: Lang::Python,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        (root, port)
+    }
+
+    #[test]
+    fn enable_requires_the_crate_that_passed_verify() {
+        let (root, mut port) = project("enable-hash");
+        let hash = backend::source_hash(&root.join(&port.crate_dir)).unwrap();
+        fs::write(root.join(&port.crate_dir).join("src/lib.rs"), "pub fn f() { panic!() }\n").unwrap();
+        port.verify = Some(Verify { built: true, total: 1, passed: 1, source_hash: Some(hash), ..Verify::default() });
+        let mut ctx = Ctx::open(&root).unwrap();
+        ctx.state.ports.insert(port.id.clone(), port);
+        ctx.save().unwrap();
+
+        let err = enable(&root, Some("demo"), false).unwrap_err();
+        assert!(err.to_string().contains("Rust changed since it passed verify"), "{err}");
+        assert!(!Ctx::open(&root).unwrap().state.ports["demo"].enabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_build_guard_covers_missing_changed_and_legacy_verify() {
+        let (root, mut port) = project("build-hash");
+        let ctx = Ctx::open(&root).unwrap();
+        assert!(crate_needs_verify(&ctx, &port).unwrap());
+
+        port.verify = Some(Verify::default());
+        assert!(!crate_needs_verify(&ctx, &port).unwrap(), "legacy verify without a hash keeps working");
+
+        let hash = backend::source_hash(&root.join(&port.crate_dir)).unwrap();
+        port.verify = Some(Verify { source_hash: Some(hash), ..Verify::default() });
+        assert!(!crate_needs_verify(&ctx, &port).unwrap());
+        fs::write(root.join(&port.crate_dir).join("Cargo.toml"), "not a valid manifest\n").unwrap();
+        assert!(crate_needs_verify(&ctx, &port).unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 }
