@@ -1187,69 +1187,160 @@ mod tests {
         assert!(!is_python("node"));
     }
 
-    #[test]
-    fn workers_are_profiled_and_recorded() {
-        let Some(python) = ["python3", "python"]
-            .into_iter()
-            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+    struct WorkerEnv {
+        python: &'static str,
+        dir: PathBuf,
+    }
+
+    impl WorkerEnv {
+        fn new(tag: &str, files: &[(&str, &str)]) -> Option<Self> {
+            let python = ["python3", "python"]
+                .into_iter()
+                .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()));
+            let Some(python) = python else {
+                eprintln!("no python on PATH, skipping");
+                return None;
+            };
+            // macOS's temp folder is a symlink and Python reports the files' real paths; on Windows,
+            // canonicalize() would give a \\?\ path Python doesn't use
+            let tmp = std::env::temp_dir();
+            let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+            let dir = tmp.join(format!("fa-{tag}-{}", std::process::id()));
+            fs::create_dir_all(dir.join("hook")).unwrap();
+            fs::create_dir_all(dir.join("children")).unwrap();
+            fs::write(dir.join("hook/sitecustomize.py"), HOOK).unwrap();
+            fs::write(dir.join("runner.py"), RUNNER).unwrap();
+            for (name, body) in files {
+                fs::write(dir.join(name), body).unwrap();
+            }
+            Some(Self { python, dir })
+        }
+
+        fn run(&self, mode: &str, job: Value, extra: &[&str]) {
+            let job_path = self.dir.join(format!("job-{mode}.json"));
+            let children = self.dir.join("children");
+            fs::write(&job_path, job.to_string()).unwrap();
+            let _ = fs::remove_dir_all(&children);
+            fs::create_dir_all(&children).unwrap();
+            let mut cmd = Command::new(self.python);
+            cmd.args([
+                self.dir.join("runner.py").as_os_str(),
+                mode.as_ref(),
+                job_path.as_os_str(),
+                "--".as_ref(),
+                "app.py".as_ref(),
+            ])
+            .args(extra)
+            .current_dir(&self.dir)
+            .env("PYTHONPATH", self.dir.join("hook"))
+            .env("FAST_ANYTHING_CHILDREN", &children)
+            .env("FAST_ANYTHING_RUNNER", self.dir.join("runner.py"))
+            .env("FAST_ANYTHING_JOB", &job_path)
+            .env("FAST_ANYTHING_MODE", mode);
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    impl Drop for WorkerEnv {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn assert_workers_profiled_and_recorded(tag: &str, app: &str) {
+        let Some(env) =
+            WorkerEnv::new(tag, &[("work.py", "def sq(x: int) -> int:\n    return x * x\n"), ("app.py", app)])
         else {
-            eprintln!("no python on PATH, skipping");
             return;
         };
-        // macOS's temp folder is a symlink and Python reports the files' real paths; on Windows,
-        // canonicalize() would give a \\?\ path Python doesn't use
-        let tmp = std::env::temp_dir();
-        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
-        let dir = tmp.join(format!("fa-workers-test-{}", std::process::id()));
-        let (hook, children) = (dir.join("hook"), dir.join("children"));
-        fs::create_dir_all(&hook).unwrap();
-        fs::create_dir_all(&children).unwrap();
-        fs::write(hook.join("sitecustomize.py"), HOOK).unwrap();
-        fs::write(dir.join("runner.py"), RUNNER).unwrap();
-        fs::write(dir.join("work.py"), "def sq(x: int) -> int:\n    return x * x\n").unwrap();
-        fs::write(
-            dir.join("app.py"),
+        env.run("profile", json!({ "root": env.dir, "out": env.dir.join("profile.json"), "max": 40 }), &[]);
+        let profile: Value = serde_json::from_str(&fs::read_to_string(env.dir.join("profile.json")).unwrap()).unwrap();
+        let sq = profile["functions"].as_array().unwrap().iter().find(|f| f["name"] == "sq").cloned();
+        env.run(
+            "record",
+            json!({ "module": "work", "func": "sq", "owner": null, "limit": 500,
+                    "out": env.dir.join("rec.jsonl"), "meta": env.dir.join("rec.meta.json") }),
+            &[],
+        );
+        let meta: Value = serde_json::from_str(&fs::read_to_string(env.dir.join("rec.meta.json")).unwrap()).unwrap();
+        let recorded = fs::read_to_string(env.dir.join("rec.jsonl")).unwrap().lines().count();
+        assert_eq!(sq.map(|f| f["ncalls"].clone()), Some(json!(20)), "sq ran 20 times in the workers");
+        assert_eq!((meta["calls"].clone(), recorded), (json!(20), 20));
+    }
+
+    #[test]
+    fn workers_are_profiled_and_recorded() {
+        assert_workers_profiled_and_recorded(
+            "workers-test",
             "from concurrent.futures import ProcessPoolExecutor\nfrom multiprocessing import get_context\n\
              from work import sq\n\nif __name__ == \"__main__\":\n\
              \x20   with ProcessPoolExecutor(2, mp_context=get_context(\"spawn\")) as pool:\n\
              \x20       print(sum(pool.map(sq, range(20))))\n",
-        )
-        .unwrap();
-        let run = |mode: &str, job: Value| {
-            let job_path = dir.join(format!("job-{mode}.json"));
-            fs::write(&job_path, job.to_string()).unwrap();
-            let _ = fs::remove_dir_all(&children);
-            fs::create_dir_all(&children).unwrap();
-            let out = Command::new(python)
-                .args([
-                    dir.join("runner.py").as_os_str(),
-                    mode.as_ref(),
-                    job_path.as_os_str(),
-                    "--".as_ref(),
-                    "app.py".as_ref(),
-                ])
-                .current_dir(&dir)
-                .env("PYTHONPATH", &hook)
-                .env("FAST_ANYTHING_CHILDREN", &children)
-                .env("FAST_ANYTHING_RUNNER", dir.join("runner.py"))
-                .env("FAST_ANYTHING_JOB", &job_path)
-                .env("FAST_ANYTHING_MODE", mode)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        };
-        run("profile", json!({ "root": dir, "out": dir.join("profile.json"), "max": 40 }));
-        let profile: Value = serde_json::from_str(&fs::read_to_string(dir.join("profile.json")).unwrap()).unwrap();
-        let sq = profile["functions"].as_array().unwrap().iter().find(|f| f["name"] == "sq").cloned();
-        run(
-            "record",
-            json!({ "module": "work", "func": "sq", "owner": null, "limit": 500,
-                               "out": dir.join("rec.jsonl"), "meta": dir.join("rec.meta.json") }),
         );
-        let meta: Value = serde_json::from_str(&fs::read_to_string(dir.join("rec.meta.json")).unwrap()).unwrap();
-        let recorded = fs::read_to_string(dir.join("rec.jsonl")).unwrap().lines().count();
-        let _ = fs::remove_dir_all(&dir);
-        assert_eq!(sq.map(|f| f["ncalls"].clone()), Some(json!(20)), "sq ran 20 times in the workers");
-        assert_eq!((meta["calls"].clone(), recorded), (json!(20), 20));
+    }
+
+    #[test]
+    fn pool_context_manager_workers_are_profiled_and_recorded() {
+        assert_workers_profiled_and_recorded(
+            "pool-with-test",
+            "from multiprocessing import Pool\nfrom work import sq\n\nif __name__ == \"__main__\":\n\
+             \x20   with Pool(2) as pool:\n\
+             \x20       print(sum(pool.map(sq, range(20))))\n",
+        );
+    }
+
+    #[test]
+    fn pool_terminate_does_not_run_queued_tasks_or_hang() {
+        let tasks = "import pathlib, time\n\n\
+             def sq(x: int) -> int:\n    return x * x\n\n\
+             def hold(started_path: str) -> None:\n\
+             \x20   pathlib.Path(started_path).write_text('1', encoding='utf-8')\n\
+             \x20   time.sleep(1.0)\n\n\
+             def side_effect(marker_path: str) -> None:\n\
+             \x20   pathlib.Path(marker_path).write_text('ran', encoding='utf-8')\n";
+        let app = "import pathlib, sys, time\n\
+             from multiprocessing import Pool\n\
+             from multiprocessing.pool import Pool as PoolClass, ThreadPool\n\
+             from tasks import hold, side_effect, sq\n\n\
+             class TrackedPool(PoolClass):\n\
+             \x20   close_calls = 0\n\
+             \x20   def close(self):\n\
+             \x20       TrackedPool.close_calls += 1\n\
+             \x20       super().close()\n\n\
+             if __name__ == \"__main__\":\n\
+             \x20   started, marker = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n\
+             \x20   with Pool(1) as pool:\n\
+             \x20       pool.apply_async(hold, (str(started),))\n\
+             \x20       pool.apply_async(side_effect, (str(marker),))\n\
+             \x20       deadline = time.monotonic() + 10\n\
+             \x20       while not started.exists() and time.monotonic() < deadline:\n\
+             \x20           time.sleep(0.02)\n\
+             \x20       assert started.exists(), 'worker did not start blocking task'\n\
+             \x20   assert not marker.exists(), 'queued task ran after terminate'\n\
+             \x20   with TrackedPool(2) as pool:\n\
+             \x20       assert pool.map(sq, range(4)) == [0, 1, 4, 9]\n\
+             \x20   assert TrackedPool.close_calls == 0, 'terminate must not call subclass close()'\n\
+             \x20   with ThreadPool(2) as pool:\n\
+             \x20       assert pool.map(sq, range(4)) == [0, 1, 4, 9]\n\
+             \x20   with Pool(2) as pool:\n\
+             \x20       res = pool.apply_async(sq, (5,))\n\
+             \x20       pool.close()\n\
+             \x20       assert res.get() == 25\n\
+             \x20   t1 = time.monotonic()\n\
+             \x20   with Pool(1, initializer=time.sleep, initargs=(30,)) as pool:\n\
+             \x20       pass\n\
+             \x20   assert time.monotonic() - t1 < 10, 'terminate hung on stuck initializer'\n";
+        let Some(env) = WorkerEnv::new("pool-term-test", &[("tasks.py", tasks), ("app.py", app)]) else {
+            return;
+        };
+        let started = env.dir.join("started.txt");
+        let marker = env.dir.join("marker.txt");
+        env.run(
+            "profile",
+            json!({ "root": env.dir, "out": env.dir.join("profile.json"), "max": 40 }),
+            &[started.to_str().unwrap(), marker.to_str().unwrap()],
+        );
+        assert!(!marker.exists(), "queued task must not execute after terminate");
     }
 }
