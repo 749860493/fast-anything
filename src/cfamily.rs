@@ -1387,6 +1387,7 @@ mod tests {
 
     /// Compiles C++ `source` with the recording code of its function `name` and runs it; returns
     /// the recordings, or None without a C++ compiler.
+    #[cfg(unix)]
     fn record_cpp(source: &str, name: &str) -> Option<Vec<Value>> {
         let cc = ["c++", "g++", "clang++"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())?;
         let f = parse(source).into_iter().find(|f| f.name == name).unwrap();
