@@ -7,7 +7,7 @@ use crate::native::{self, Flavor, Patches};
 use crate::python::DISABLE_ENV;
 use crate::state::{Ctx, Port, Verify};
 use crate::util::{self, combined, output, tail};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -150,7 +150,9 @@ fn run_php(
 ) -> Result<std::process::Output> {
     let mut cmd = Command::new(php);
     cmd.arg("-d")
-        .arg(format!("auto_prepend_file={}", prepend.display()))
+        // quoted, as an ini value: a path can hold characters ini syntax reads as operators (~ in
+        // Windows short names, like C:\Users\RUNNER~1)
+        .arg(format!("auto_prepend_file=\"{}\"", prepend.display()))
         .args(args)
         .current_dir(&ctx.root)
         .env(DISABLE_ENV, "1")
@@ -324,17 +326,21 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         "{} ends with ?>: remove the closing tag so code can follow it",
         port.file
     );
-    if text.contains("namespace ")
-        && text.lines().any(|l| l.trim_start().starts_with("namespace ") && l.trim_end().ends_with('{'))
-    {
-        bail!("{} uses braced namespaces, which fast-anything can't add code to yet", port.file);
-    }
+    // with braced namespaces, no code may follow them outside a namespace block: the bridge goes in
+    // a global one of its own, and the function names it from the root
+    let braced = text.lines().any(|l| l.trim_start().starts_with("namespace ") && l.trim_end().ends_with('{'));
     let class = bridge_class(port);
     let from = file.parent().context("file has no folder")?;
     let (_, lib) = port.lang.artifact(&port.ext);
     let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(lib)));
     let lib_lit = format!("'{}'", lib_rel.replace('\\', "\\\\").replace('\'', "\\'"));
     let bridge = BRIDGE.replace("/*CLASS*/", &class).replace("/*ID*/", &port.id).replace("/*LIB*/", &lib_lit);
+    // in the file's own line endings (a Windows checkout gives bridge.php CRLF), so disable finds
+    // what it added
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let bridge = bridge.replace("\r\n", "\n").replace('\n', nl);
+    let (bridge, class) =
+        if braced { (format!("namespace {{{nl}{bridge}{nl}}}"), format!("\\{class}")) } else { (bridge, class) };
     let prologue =
         format!("if ({class}::$on ?? {class}::load()) return {class}::call({}, func_get_args());", name_const(hs));
     let patched =
@@ -354,6 +360,57 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ports_functions_in_braced_namespaces() {
+        if !Command::new("php").arg("-v").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no php on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-php-braced-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let app = "<?php\nnamespace Text {\n    function width(string $s): int\n    {\n        return strlen($s);\n    }\n}\n\nnamespace {\n    echo \\Text\\width('h\u{e9}llo'), \"\\n\";\n}\n";
+        fs::write(dir.join("app.php"), app).unwrap();
+        let mut ctx = Ctx::open(&dir).unwrap();
+        let found = profile(&ctx, "php", &["app.php".into()]).unwrap();
+        assert!(found.functions.iter().any(|f| f.name == "width" && f.blockers.is_empty()), "{:?}", found.functions);
+        let hs = Hotspot {
+            id: "Text.width".into(),
+            file: "app.php".into(),
+            line: 3,
+            name: "width".into(),
+            ..Hotspot::default()
+        };
+        ctx.state.hotspots.push(hs);
+        let port = Port {
+            id: "Text.width".into(),
+            file: "app.php".into(),
+            module: "Text".into(),
+            func: "width".into(),
+            ext: "fa_text_width".into(),
+            crate_dir: ".fast/ports/Text.width".into(),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: backend::Lang::Php,
+            owner: None,
+            line: 3,
+            sources: vec![],
+        };
+        enable(&ctx, &port).unwrap();
+        // without the port's library, the bridge doesn't load and the PHP version runs
+        let lint = Command::new("php").args(["-l", "app.php"]).current_dir(&dir).output().unwrap();
+        let run = Command::new("php").arg("app.php").current_dir(&dir).output().unwrap();
+        let enabled = fs::read_to_string(dir.join("app.php")).unwrap();
+        disable(&ctx, &port).unwrap();
+        let after = fs::read_to_string(dir.join("app.php")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(lint.status.success(), "{}{enabled}", String::from_utf8_lossy(&lint.stdout));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "6\n", "{}", String::from_utf8_lossy(&run.stderr));
+        assert!(enabled.contains("namespace {\nfinal class"), "{enabled}");
+        assert_eq!(after, app);
+    }
 
     #[test]
     fn the_recorder_adds_edge_cases() {
