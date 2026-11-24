@@ -8,8 +8,10 @@
 - C#: when the time is in libraries reached from `Main` or async code, `scan` says which; `dotnet test` gets a clear explanation (#79).
 - `doctor` tells "ready to scan" from "ready to port": scanning doesn't need Rust (#79).
 - MCP `fast_scan` returns `why_not` for each function and the scan's notes.
+- `clean` removes the build cache; `clean --all` switches every port back and resets `.fast` (#76).
+- Python: a repeated SIGTERM no longer cuts off a worker writing its results.
 
-Thanks @JuggyBob.
+Thanks @JuggyBob and @ashp15205.
 
 ## 0.8.5
 
