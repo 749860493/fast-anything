@@ -1385,6 +1385,62 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Compiles C++ `source` with the recording code of its function `name` and runs it; returns
+    /// the recordings, or None without a C++ compiler.
+    fn record_cpp(source: &str, name: &str) -> Option<Vec<Value>> {
+        let cc = ["c++", "g++", "clang++"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())?;
+        let f = parse(source).into_iter().find(|f| f.name == name).unwrap();
+        let hs = Hotspot {
+            name: f.name.clone(),
+            params: f.params.clone(),
+            returns: Some(f.ret.clone()),
+            ..Hotspot::default()
+        };
+        let dir = std::env::temp_dir().join(format!("fa-cpp-rec-test-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("fa_rec.hpp"), REC_HPP.replace("/*JSON*/", JSON_HPP)).unwrap();
+        let prologue = cpp_record_prologue(&hs).replace('\n', " ");
+        fs::write(dir.join("app.cpp"), insert_at(source, vec![(f.body_open + 1, format!(" {prologue}"))])).unwrap();
+        let built = Command::new(cc)
+            .args(["-std=c++17", "-O1", "-include", "fa_rec.hpp", "app.cpp", "-o", "app"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let ran = Command::new(dir.join("app"))
+            .current_dir(&dir)
+            .env("FAST_ANYTHING_RECORD_OUT", dir.join("rec.jsonl"))
+            .env("FAST_ANYTHING_RECORD_META", dir.join("meta.json"))
+            .output()
+            .unwrap();
+        let text = fs::read_to_string(dir.join("rec.jsonl")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        Some(text.lines().map(|l| serde_json::from_str(l).unwrap()).collect())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpp_edge_cases_that_hang_or_crash_are_skipped() {
+        use serde_json::json;
+        // never returns for 0 or -1
+        let spin = "long spin(long n) {\n    long steps = 0;\n    while (n != 1) {\n        n = n % 2 ? 3 * n + 1 : n / 2;\n        steps++;\n    }\n    return steps;\n}\nint main() {\n    long t = 0;\n    for (long k = 2; k < 30; k++) t += spin(k);\n    return t > 0 ? 0 : 1;\n}\n";
+        let started = std::time::Instant::now();
+        let Some(cases) = record_cpp(spin, "spin") else {
+            eprintln!("no C++ compiler on PATH, skipping");
+            return;
+        };
+        assert!(started.elapsed().as_secs() < 30, "the recording finished");
+        let edges: Vec<&Value> = cases.iter().filter(|c| c["derived"] == "edge").collect();
+        assert!(edges.iter().any(|c| c["args"] == json!([1]) && c["result"] == json!(0)), "{edges:?}");
+        assert!(edges.iter().all(|c| c["args"] != json!([0]) && c["args"] != json!([-1])), "{edges:?}");
+        // reads xs[0] whatever the size: crashes on an empty vector
+        let first = "#include <vector>\nint first(const std::vector<int> &xs) {\n    return ((volatile const int *) xs.data())[0] * 0 + (int) xs.size();\n}\nint main() {\n    std::vector<int> xs(20, 1);\n    int t = 0;\n    for (int k = 0; k < 3; k++) t += first(xs);\n    return t > 0 ? 0 : 1;\n}\n";
+        let cases = record_cpp(first, "first").unwrap();
+        let edges: Vec<&Value> = cases.iter().filter(|c| c["derived"] == "edge").collect();
+        assert!(!edges.is_empty() && edges.iter().all(|c| c["args"] != json!([[]])), "{edges:?}");
+    }
+
     #[test]
     fn finds_c_and_cpp_functions() {
         let c = "#include <stdio.h>\n/* a { comment */\nstatic int lev(const char *a, const char *b) {\n  return 0;\n}\n\nlong count(const int *xs, size_t n, int max)\n{\n  if (n) { return 1; }\n  printf(\"{\");\n  return 0;\n}\nint main(void) { return lev(\"a\", \"b\"); }\n";
