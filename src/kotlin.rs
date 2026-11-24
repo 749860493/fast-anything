@@ -481,9 +481,7 @@ fn describe_file(path: &Path) -> Vec<Method> {
             }
             for p in split_top(&f.params) {
                 let p = p.trim();
-                if words(p).contains(&"vararg") {
-                    blockers.push("takes vararg".to_string());
-                }
+                let vararg = words(p).contains(&"vararg");
                 let p = p.trim_start_matches(|ch: char| ch != ':' && !ch.is_alphanumeric() && ch != '_');
                 let (decl, default) = match p.split_once('=') {
                     Some((d, v)) => (d.trim(), Some(v.trim().to_string())),
@@ -491,7 +489,9 @@ fn describe_file(path: &Path) -> Vec<Method> {
                 };
                 let (name, ty) = decl.split_once(':').unwrap_or((decl, ""));
                 let name = words(name).last().copied().unwrap_or_default().to_string();
-                params.push(Param { name, annotation: Some(ty.trim().to_string()), default, kwonly: false });
+                // inside the function a vararg is an array (IntArray, Array<String>...), passed with *
+                let ty = if vararg { format!("vararg {}", vararg_array(ty.trim())) } else { ty.trim().to_string() };
+                params.push(Param { name, annotation: Some(ty), default, kwonly: false });
             }
             let body = f.body.map(|(b, e)| &code[b..=e]).unwrap_or_default();
             let io: Vec<&str> = IO.iter().filter(|w| body.contains(*w)).map(|w| w.trim_end_matches('(')).collect();
@@ -623,7 +623,10 @@ fn args_array(hs: &Hotspot) -> String {
 /// The function called again with the arguments from an Object[]: name(a[0] as T, ...), or for an
 /// extension (a[0] as R).name(...).
 fn call_with(hs: &Hotspot) -> String {
-    let cast = |i: usize, p: &Param| format!("__faA[{i}] as {}", p.annotation.as_deref().unwrap_or("Any?"));
+    let cast = |i: usize, p: &Param| match p.annotation.as_deref().and_then(|t| t.strip_prefix("vararg ")) {
+        Some(array) => format!("*(__faA[{i}] as {array})"),
+        None => format!("__faA[{i}] as {}", p.annotation.as_deref().unwrap_or("Any?")),
+    };
     match hs.params.first().filter(|p| p.name == "receiver") {
         Some(r) => {
             let rest: Vec<String> = hs.params.iter().enumerate().skip(1).map(|(i, p)| cast(i, p)).collect();
@@ -691,8 +694,17 @@ pub fn record(ctx: &Ctx, program: &str, args: &[String], hs: &Hotspot, out: &Pat
 // ------------------------------------------------------------------ the crate
 
 /// Rust type for a Kotlin type.
+/// The array a vararg parameter of this element type is inside the function.
+fn vararg_array(item: &str) -> String {
+    match item {
+        "Int" | "Long" | "Short" | "Byte" | "Double" | "Float" | "Boolean" | "Char" => format!("{item}Array"),
+        _ => format!("Array<{item}>"),
+    }
+}
+
 pub fn rust_type(t: &str) -> Option<String> {
     let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    let t = t.strip_prefix("vararg").unwrap_or(&t);
     let t = t.trim_start_matches("kotlin.collections.").trim_start_matches("kotlin.");
     if let Some(inner) = t.strip_suffix('?') {
         return rust_type(inner).map(|r| format!("Option<{r}>"));
@@ -731,6 +743,7 @@ pub fn rust_type(t: &str) -> Option<String> {
 /// A Kotlin type in Java syntax, for the bridge to convert the port's result back to.
 fn java_type(t: &str, boxed: bool) -> String {
     let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    let t = t.strip_prefix("vararg").unwrap_or(&t);
     let t = t.trim_start_matches("kotlin.collections.").trim_start_matches("kotlin.");
     if let Some(inner) = t.strip_suffix('?') {
         return java_type(inner, true);
@@ -915,6 +928,29 @@ mod tests {
         assert_eq!(java_type("Double?", false), "Double");
         assert_eq!(java_type("Map<String, Long>", false), "java.util.Map<String, Long>");
         assert_eq!(java_type("Array<String>", false), "String[]");
+    }
+
+    #[test]
+    fn varargs_are_ported_as_arrays() {
+        let ms = describe_text(
+            "calc.kt",
+            "package demo\n\nfun total(scale: Int, vararg xs: Int): Long {\n    return xs.sumOf { it.toLong() * scale }\n}\n\n\
+             fun join(vararg words: String): String {\n    return words.joinToString(\" \")\n}\n",
+        );
+        let total = ms.iter().find(|m| m.name == "total").unwrap();
+        assert!(total.blockers.is_empty(), "{:?}", total.blockers);
+        assert_eq!(total.params[1].annotation.as_deref(), Some("vararg IntArray"));
+        let join = ms.iter().find(|m| m.name == "join").unwrap();
+        assert_eq!(join.params[0].annotation.as_deref(), Some("vararg Array<String>"));
+        assert_eq!(rust_type("vararg IntArray").as_deref(), Some("Vec<i32>"));
+        assert_eq!(java_type("vararg Array<String>", false), "String[]");
+        let hs = Hotspot {
+            name: "total".into(),
+            params: total.params.clone(),
+            returns: Some("Long".into()),
+            ..Hotspot::default()
+        };
+        assert_eq!(call_with(&hs), "total(__faA[0] as Int, *(__faA[1] as IntArray))");
     }
 
     #[test]
