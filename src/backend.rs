@@ -305,8 +305,9 @@ pub const CARGO_CONFIG: &str = "# Built for the machine that runs it: .fast/lib 
 [target.aarch64-apple-darwin]\nrustflags = [\"-C\", \"target-cpu=native\", \"-C\", \"link-arg=-undefined\", \"-C\", \"link-arg=dynamic_lookup\"]\n\n\
 [target.x86_64-apple-darwin]\nrustflags = [\"-C\", \"target-cpu=native\", \"-C\", \"link-arg=-undefined\", \"-C\", \"link-arg=dynamic_lookup\"]\n";
 
-/// No LTO and the default codegen units: a port lives in one crate, so cross-crate inlining buys
-/// nothing measurable, while rebuilds after each edit get about 4x faster (4.1s to 1.1s).
+/// No LTO and the default codegen units: a port's hot loop lives in its own crate, so cross-crate
+/// inlining buys nothing measurable, while rebuilds after each edit get 4-9x faster (4.1s to 1.1s;
+/// a PyO3 port 3.5s to 0.37s, its run time within noise).
 pub const RELEASE_PROFILE: &str = "[profile.release]\nopt-level = 3\nlto = false\n\n\
 # A crate of its own, even inside another Cargo workspace.\n[workspace]\n";
 
