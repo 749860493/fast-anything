@@ -57,32 +57,29 @@ pub fn unwrap_env_runner(command: &[String], query: impl Fn(&[&str]) -> Result<S
 }
 
 /// Whether `arg` is a Windows Python Launcher (`py`) version selector such as `-3`, `-3.13`,
-/// `-3.13-64`, `-3-arm64`, or `-V:3.13`. Excludes `-0`/`-0p` (`--list`) and plain Python flags.
+/// `-3.13.1`, `-3.13t`, `-3.13t-64`, `-3-arm64`, `-V:3.13`, `-V:`, or `--version:3.13`.
+/// Excludes `-0`/`-0p` (`--list`), `-V`, and plain Python flags.
 fn is_py_version_selector(arg: &str) -> bool {
-    if let Some(tag) = arg.strip_prefix("-V:") {
-        return !tag.is_empty();
+    if arg.starts_with("-V:") || arg.starts_with("--version:") {
+        return true;
     }
     let Some(rest) = arg.strip_prefix('-') else {
         return false;
     };
-    let Some(first) = rest.as_bytes().first().copied() else {
-        return false;
-    };
-    if !matches!(first, b'1'..=b'9') {
-        return false;
-    }
     let (ver, suffix) = match rest.find('-') {
         Some(i) => (&rest[..i], Some(&rest[i + 1..])),
         None => (rest, None),
     };
-    let valid_ver = match ver.split_once('.') {
-        Some((maj, min)) => {
-            !maj.is_empty()
-                && !min.is_empty()
-                && maj.bytes().all(|b| b.is_ascii_digit())
-                && min.bytes().all(|b| b.is_ascii_digit())
+    // Free-threaded builds (PEP 703) allow a trailing `t`/`T` before any arch suffix (e.g. `-3.13t-64`).
+    let ver = ver.strip_suffix(['t', 'T']).unwrap_or(ver);
+    let mut parts = ver.split('.');
+    let valid_ver = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        // py.exe only treats single-digit major versions 2 and 3 as short selectors (`-2...`, `-3...`).
+        (Some("2" | "3"), min, micro, None) => {
+            let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            min.is_none_or(digits) && micro.is_none_or(digits)
         }
-        None => ver.bytes().all(|b| b.is_ascii_digit()),
+        _ => false,
     };
     let valid_suffix = match suffix {
         None => true,
@@ -1433,14 +1430,22 @@ sys.exit(1 if fails else 0)
         for (prog, raw, want_sel, want_rest) in [
             ("py", "-3 app.py", Some("-3"), vec!["app.py"]),
             ("py", "-3.13 app.py arg1", Some("-3.13"), vec!["app.py", "arg1"]),
+            ("py", "-3.13.1 app.py", Some("-3.13.1"), vec!["app.py"]),
+            ("py", "-3t app.py", Some("-3t"), vec!["app.py"]),
+            ("py", "-3.13t-64 app.py", Some("-3.13t-64"), vec!["app.py"]),
             ("py", "-V:3.13 -u app.py", Some("-V:3.13"), vec!["-u", "app.py"]),
+            ("py", "--version:3.13 app.py", Some("--version:3.13"), vec!["app.py"]),
+            ("py", "-V: app.py", Some("-V:"), vec!["app.py"]),
+            ("py", "--version: app.py", Some("--version:"), vec!["app.py"]),
             ("py", "-3.13-64 app.py", Some("-3.13-64"), vec!["app.py"]),
             ("C:\\Windows\\py.exe", "-V:PythonCore/3.13 app.py", Some("-V:PythonCore/3.13"), vec!["app.py"]),
             ("py", "app.py", None, vec!["app.py"]),
             ("py", "-u app.py", None, vec!["-u", "app.py"]),
             ("py", "-0 app.py", None, vec!["-0", "app.py"]),
+            ("py", "-1 app.py", None, vec!["-1", "app.py"]),
+            ("py", "-10 app.py", None, vec!["-10", "app.py"]),
             ("py", "-V app.py", None, vec!["-V", "app.py"]),
-            ("py", "-V: app.py", None, vec!["-V:", "app.py"]),
+            ("py", "--VERSION:3.13 app.py", None, vec!["--VERSION:3.13", "app.py"]),
             ("python", "-3 app.py", None, vec!["-3", "app.py"]),
             ("python", "app.py", None, vec!["app.py"]),
             ("python3", "-V:3.13 app.py", None, vec!["-V:3.13", "app.py"]),
@@ -1510,13 +1515,22 @@ sys.exit(1 if fails else 0)
             .unwrap();
         fs::write(
             dir.join("app.py"),
-            "from work import crunch\nif __name__ == '__main__':\n    print(sum(crunch(500) for _ in range(50)))\n",
+            "import sys\nfrom work import crunch\nif __name__ == '__main__':\n\
+             \x20   for bad in ('-3', '-V:', '--version:'):\n\
+             \x20       assert not any(a.startswith(bad) for a in sys.orig_argv), sys.orig_argv\n\
+             \x20   print(sum(crunch(500) for _ in range(50)))\n",
         )
         .unwrap();
+        // Verify resolve forwards the selector to py.exe (a nonexistent version must fail instead of falling back).
+        assert!(
+            resolve("py", &[String::from("-V:fast-anything-nonexistent/3.99"), String::from("app.py")], &dir).is_err(),
+            "nonexistent py launcher selector must fail resolve"
+        );
         for cmd in [
             vec!["py".into(), "-3".into(), "app.py".into()],
             vec!["py".into(), format!("-{xy}"), "app.py".into()],
             vec!["py".into(), format!("-V:{xy}"), "app.py".into()],
+            vec!["py".into(), format!("--version:{xy}"), "app.py".into()],
             vec!["py".into(), "app.py".into()],
             vec!["python".into(), "app.py".into()],
         ] {
