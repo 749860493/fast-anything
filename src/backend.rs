@@ -139,18 +139,37 @@ impl Lang {
         }
     }
 
-    pub fn profile(self, ctx: &Ctx, exe: &str, args: &[String]) -> Result<Profile> {
+    /// Whether `scan --duration` can stop this language's apps.
+    pub fn stops_after_duration(self) -> bool {
+        // R: scan interrupts it with SIGINT, which Windows doesn't have
+        matches!(
+            self,
+            Lang::Python
+                | Lang::Node
+                | Lang::Go
+                | Lang::Java
+                | Lang::Kotlin
+                | Lang::Ruby
+                | Lang::Php
+                | Lang::C
+                | Lang::Cpp
+                | Lang::CSharp
+        ) || (self == Lang::R && cfg!(unix))
+    }
+
+    /// `duration` (see stops_after_duration): stop the app after that many seconds.
+    pub fn profile(self, ctx: &Ctx, exe: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
         match self {
-            Lang::Python => python::profile(ctx, exe, args),
-            Lang::Node => node::profile(ctx, exe, args),
-            Lang::Ruby => ruby::profile(ctx, exe, args),
-            Lang::Java => java::profile(ctx, exe, args),
-            Lang::Go => golang::profile(ctx, exe, args),
-            Lang::Php => php::profile(ctx, exe, args),
-            Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
-            Lang::CSharp => csharp::profile(ctx, exe, args, None),
-            Lang::R => r::profile(ctx, exe, args),
-            Lang::Kotlin => kotlin::profile(ctx, exe, args),
+            Lang::Python => python::profile(ctx, exe, args, duration),
+            Lang::Node => node::profile(ctx, exe, args, duration),
+            Lang::Ruby => ruby::profile(ctx, exe, args, duration),
+            Lang::Java => java::profile(ctx, exe, args, duration),
+            Lang::Go => golang::profile(ctx, exe, args, duration),
+            Lang::Php => php::profile(ctx, exe, args, duration),
+            Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self, duration),
+            Lang::CSharp => csharp::profile(ctx, exe, args, duration),
+            Lang::R => r::profile(ctx, exe, args, duration),
+            Lang::Kotlin => kotlin::profile(ctx, exe, args, duration),
         }
     }
 

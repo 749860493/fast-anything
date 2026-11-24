@@ -48,6 +48,30 @@ pub fn output(cmd: &mut Command, what: &str) -> Result<Output> {
 /// SIGTERM elsewhere), so it can shut down cleanly and write what it has, then ends it for good after `grace`.
 /// Also says whether it had to be stopped.
 pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace: Duration) -> Result<(Output, bool)> {
+    output_signalling(cmd, what, limit, grace, "TERM")
+}
+
+/// output_for, asking the process to stop with this signal on Unix (INT is Ctrl+C).
+pub fn output_signalling(
+    cmd: &mut Command,
+    what: &str,
+    limit: Option<Duration>,
+    grace: Duration,
+    signal: &str,
+) -> Result<(Output, bool)> {
+    output_stopping(cmd, what, limit, grace, signal, || true)
+}
+
+/// output_signalling, for an app that saves its own results on time: where it can't be asked to close (a
+/// console app on Windows), it's left to run, at most `grace` longer, until `saved` says they're written.
+pub fn output_stopping(
+    cmd: &mut Command,
+    what: &str,
+    limit: Option<Duration>,
+    grace: Duration,
+    signal: &str,
+    saved: impl Fn() -> bool,
+) -> Result<(Output, bool)> {
     let Some(limit) = limit else { return Ok((output(cmd, what)?, false)) };
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -65,16 +89,14 @@ pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace:
     }
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let started = Instant::now();
-    let mut asked: Option<Instant> = None;
+    let mut asked: Option<(Instant, bool)> = None;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         match asked {
-            None if started.elapsed() >= limit => {
-                asked = Some(if ask_to_close(child.id()) { Instant::now() } else { Instant::now() - grace });
-            }
-            Some(at) if at.elapsed() >= grace => {
+            None if started.elapsed() >= limit => asked = Some((Instant::now(), ask_to_close(child.id(), signal))),
+            Some((at, closing)) if at.elapsed() >= grace || (!closing && saved()) => {
                 let _ = child.kill();
                 break child.wait()?;
             }
@@ -87,8 +109,9 @@ pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace:
 }
 
 /// Ask a process to close the way a user would. False if it can't be asked (a console app on Windows).
-fn ask_to_close(pid: u32) -> bool {
-    let (program, args) = if cfg!(windows) { ("taskkill", ["/PID"]) } else { ("kill", ["-TERM"]) };
+fn ask_to_close(pid: u32, signal: &str) -> bool {
+    let flag = format!("-{signal}");
+    let (program, args) = if cfg!(windows) { ("taskkill", ["/PID"]) } else { ("kill", [flag.as_str()]) };
     Command::new(program)
         .args(args)
         .arg(pid.to_string())

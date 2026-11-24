@@ -36,16 +36,16 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
     let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);
     let lang = crate::kotlin::refine(lang, &command[0], &ctx.root);
     if let Some(d) = duration {
-        ensure!(lang == Lang::CSharp, "--duration works for C# apps only so far");
+        ensure!(lang.stops_after_duration(), "--duration stops R apps with SIGINT, which Windows doesn't have");
         ensure!(d.is_finite() && d > 0.0, "--duration takes a number of seconds, e.g. --duration 30");
     }
     let exe = lang.resolve(&command[0], &command[1..], &ctx.root)?;
     ctx.state.command = command.clone();
     ui::step(format!("profiling {}", ui::bold(command.join(" "))));
-    let profile = match duration {
-        Some(d) => crate::csharp::profile(&ctx, &exe, &command[1..], Some(d))?,
-        None => lang.profile(&ctx, &exe, &command[1..])?,
-    };
+    if let Some(d) = duration.filter(|_| lang != Lang::CSharp) {
+        ui::line(format!("  stopping it after {d}s"));
+    }
+    let profile = lang.profile(&ctx, &exe, &command[1..], duration)?;
     let hotspots = hotspot::rank(profile.functions, profile.wall);
     ctx.state.lang = lang;
     ctx.state.runtime = Some(exe);

@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const DESCRIBE: &str = include_str!("java/Describe.java");
 pub(crate) const JSON: &str = include_str!("java/Json.java");
@@ -251,16 +251,40 @@ pub(crate) fn app_command(program: &str, args: &[String]) -> Command {
     cmd
 }
 
-pub fn profile(ctx: &Ctx, program: &str, args: &[String]) -> Result<Profile> {
-    profile_with(ctx, program, args, |java| describe(ctx, java, &sources(&ctx.root, program, args)?))
+pub fn profile(ctx: &Ctx, program: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
+    profile_with(ctx, program, args, duration, |java| describe(ctx, java, &sources(&ctx.root, program, args)?))
+}
+
+/// Every flight recording in `dir` is written out: there is one, none is empty, and none is still open for
+/// writing (Windows only lets a file be opened exclusively once its writer has closed it).
+fn recordings_written(dir: &Path) -> bool {
+    let files: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(entries) => {
+            entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jfr")).collect()
+        }
+        Err(_) => return false,
+    };
+    !files.is_empty() && files.iter().all(|f| fs::metadata(f).is_ok_and(|m| m.len() > 0) && closed(f))
+}
+
+#[cfg(windows)]
+fn closed(f: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new().read(true).share_mode(0).open(f).is_ok()
+}
+
+#[cfg(not(windows))]
+fn closed(_: &Path) -> bool {
+    true
 }
 
 /// Profile the app with Flight Recorder and rank the methods `describe` finds in its sources
-/// (given the JDK that runs the build).
+/// (given the JDK that runs the build). `duration`: stop the app after that many seconds.
 pub(crate) fn profile_with(
     ctx: &Ctx,
     program: &str,
     args: &[String],
+    duration: Option<f64>,
     describe: impl FnOnce(&str) -> Result<Vec<Method>>,
 ) -> Result<Profile> {
     let build = runner(program) != Some(Runner::Source);
@@ -268,8 +292,11 @@ pub(crate) fn profile_with(
     let jfr_dir = ctx.fast.join("jfr");
     let _ = fs::remove_dir_all(&jfr_dir);
     fs::create_dir_all(&jfr_dir)?;
+    // with --duration, the recording also ends (and is written) on its own after that long: where
+    // the app can't be asked to close (a console app on Windows), it's then stopped without losing it
+    let window = duration.map(|d| format!(",duration={}s", d.ceil() as u64)).unwrap_or_default();
     let flags = format!(
-        "-XX:StartFlightRecording:filename={}/%p.jfr,settings=profile -Xlog:jfr+startup=error",
+        "-XX:StartFlightRecording:filename={}/%p.jfr,settings=profile{window} -Xlog:jfr+startup=error",
         util::forward_slashes(&jfr_dir)
     );
     let mut cmd = if build { app_command(program, args) } else { Command::new(program) };
@@ -281,9 +308,17 @@ pub(crate) fn profile_with(
         cmd.args(flags.split(' ')).args(args);
     }
     let started = Instant::now();
-    let run = output(cmd.current_dir(&ctx.root).env(DISABLE_ENV, "1").stdin(Stdio::null()), program)?;
+    // asked to close (SIGTERM) at the end, the JVM runs its shutdown hooks and writes the recording
+    let (run, stopped) = util::output_stopping(
+        cmd.current_dir(&ctx.root).env(DISABLE_ENV, "1").stdin(Stdio::null()),
+        program,
+        duration.map(|d| Duration::from_secs_f64(d.ceil() + 2.0)),
+        Duration::from_secs(15),
+        "TERM",
+        || recordings_written(&jfr_dir),
+    )?;
     let wall = started.elapsed().as_secs_f64();
-    ensure!(run.status.success(), "the app failed ({}):\n{}", run.status, tail(&combined(&run), 30));
+    ensure!(stopped || run.status.success(), "the app failed ({}):\n{}", run.status, tail(&combined(&run), 30));
     let mut events = Vec::new();
     let mut unreadable = None;
     for f in fs::read_dir(&jfr_dir)?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jfr")) {
@@ -600,6 +635,33 @@ mod tests {
             assert!(m.blockers.is_empty(), "{name}: {:?}", m.blockers);
             assert_eq!(m.params.iter().map(|p| p.annotation.as_deref().unwrap()).collect::<Vec<_>>(), types);
         }
+    }
+
+    #[test]
+    fn duration_stops_an_app_that_runs_until_closed() {
+        if !Command::new("java").arg("-version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no java on PATH, skipping");
+            return;
+        }
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-java-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: work, forever
+        let app = "public class App {\n    static long work(int n) {\n        long s = 0;\n        for (int i = 0; i < n; i++) s += (long) i * i % 7;\n        return s;\n    }\n\n    public static void main(String[] args) throws Exception {\n        long sink = 0;\n        while (true) {\n            sink += work(20_000_000);\n            Thread.sleep(1);\n        }\n    }\n}\n";
+        fs::write(dir.join("App.java"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let started = Instant::now();
+        // the window starts with the JVM, and `java App.java` compiles the source inside it: that
+        // takes longer on Windows
+        let window = if cfg!(windows) { 8.0 } else { 3.0 };
+        let p = profile(&ctx, "java", &["App.java".into()], Some(window));
+        let took = started.elapsed().as_secs_f64();
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work" && f.cumtime > 0.0), "{:?}", p.functions);
+        assert!(took < window + 20.0, "{took}");
     }
 
     #[test]
