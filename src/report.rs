@@ -1,6 +1,6 @@
 //! A report worth sharing: markdown for the PR, an SVG card for the README / socials.
 
-use crate::bench::BenchResult;
+use crate::bench::{BenchResult, Verdict};
 use crate::state::{Ctx, Port};
 use crate::util::{nanos, secs, times};
 use anyhow::{Context, Result};
@@ -30,7 +30,13 @@ fn port_line(p: &Port) -> String {
 pub fn svg(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
     let headline = times(b.speedup);
     let after_w = (300.0 * b.after.median / b.before.median.max(1e-12)).clamp(4.0, 300.0);
-    let detail = ports.iter().take(2).map(|p| port_line(p)).collect::<Vec<_>>().join("   ");
+    let mut detail = ports.iter().take(2).map(|p| port_line(p)).collect::<Vec<_>>().join("   ");
+    // the card's detail line holds about 95 characters
+    if let Some(cpu) = b.cpu_note()
+        && detail.chars().count() + cpu.chars().count() + 3 <= 95
+    {
+        detail = if detail.is_empty() { cpu } else { format!("{detail}   {cpu}") };
+    }
     let sans = "system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif";
     let mono = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
     format!(
@@ -58,14 +64,44 @@ pub fn svg(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
 }
 
 pub fn markdown(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
+    // results saved before rounds and the A/A control have no verdict and no range
+    let how = if b.verdict.is_some() {
+        format!(
+            "median of {} rounds, each running the original twice and Rust once in rotated order; middle half of the rounds {}–{}",
+            b.runs,
+            times(b.speedup_q1).trim_end_matches('×'),
+            times(b.speedup_q3)
+        )
+    } else {
+        format!("median of {} runs each, original and Rust interleaved", b.runs)
+    };
     let mut md = format!(
-        "# ⚡ {project}: {} faster\n\n`{}` went from **{}** to **{}** (median of {} runs each, original and Rust interleaved).\n\n![fast-anything report](report.svg)\n\n| function | per call | checked against |\n|---|---|---|\n",
+        "# ⚡ {project}: {} faster\n\n`{}` went from **{}** to **{}** ({how}).\n\n",
         times(b.speedup),
         b.command.join(" "),
         secs(b.before.median),
         secs(b.after.median),
-        b.runs
     );
+    if let (Some(before), Some(after), Some(cpu)) = (&b.cpu_before, &b.cpu_after, b.cpu_note()) {
+        md.push_str(&format!(
+            "- {cpu}: **{}** → **{}** (user + system, the app and the processes it waits for)\n",
+            secs(before.median),
+            secs(after.median)
+        ));
+    }
+    // results from before the A/A control have no verdict
+    if let Some(v) = b.verdict {
+        let verdict = match v {
+            Verdict::Faster => "the Rust ports' change is clearly beyond that",
+            Verdict::Slower => "the Rust ports make it slower, beyond that",
+            Verdict::Noise => "the Rust ports' change is within that noise",
+        };
+        md.push_str(&format!(
+            "- A/A control, the original against itself in the same rounds: {:+.1}% (middle half {:+.1}% to {:+.1}%); {verdict}\n",
+            b.aa.median, b.aa.q1, b.aa.q3
+        ));
+    }
+    md.push_str("\n![fast-anything report](report.svg)\n\n| function | per call | checked against |\n|---|---|---|\n");
     for p in ports {
         let v = p.verify.clone().unwrap_or_default();
         let per_call = v
@@ -92,7 +128,7 @@ pub fn write(ctx: &Ctx) -> Result<ReportOut> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bench::Stats;
+    use crate::bench::{Spread, Stats};
 
     #[test]
     fn svg_is_escaped_and_scaled() {
@@ -106,5 +142,37 @@ mod tests {
         assert!(card.contains("a&lt;b&gt;&amp;c"));
         assert!(card.contains("8.0×"));
         assert!(card.contains(r#"width="37.5""#));
+    }
+
+    #[test]
+    fn report_shows_cpu_time_and_the_aa_control() {
+        let b = BenchResult {
+            command: vec!["python".into(), "app.py".into()],
+            runs: 5,
+            before: Stats { median: 12.0, ..Stats::default() },
+            after: Stats { median: 0.05, ..Stats::default() },
+            speedup: 234.0,
+            speedup_q1: 228.0,
+            speedup_q3: 240.0,
+            aa: Spread { median: 0.7, q1: -0.3, q3: 0.9 },
+            verdict: Some(Verdict::Faster),
+            cpu_before: Some(Stats { median: 11.9, ..Stats::default() }),
+            cpu_after: Some(Stats { median: 0.125, ..Stats::default() }),
+            cpu_speedup: Some(95.2),
+            ..BenchResult::default()
+        };
+        let md = markdown("demo", &b, &[]);
+        assert!(md.contains("median of 5 rounds") && md.contains("228–240×"), "{md}");
+        assert!(md.contains("- CPU time 95×: **11.90s** → **125ms**"), "{md}");
+        assert!(
+            md.contains("+0.7% (middle half -0.3% to +0.9%); the Rust ports' change is clearly beyond that"),
+            "{md}"
+        );
+        let card = svg("demo", &b, &[]);
+        assert!(card.contains("234×") && card.contains("CPU time 95×"));
+
+        let old = BenchResult { speedup: 8.0, ..BenchResult::default() };
+        let md = markdown("demo", &old, &[]);
+        assert!(!md.contains("CPU time") && !md.contains("A/A") && md.contains("interleaved"), "{md}");
     }
 }

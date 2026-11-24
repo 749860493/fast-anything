@@ -52,8 +52,8 @@ fn tools() -> Value {
         ),
         tool(
             "fast_bench",
-            "Time the whole app: original code vs Rust ports.",
-            json!({ "runs": { "type": "integer", "default": 5 }, "path": path }),
+            "Time the whole app, original code vs Rust ports, in rounds that run the original twice (an A/A control for noise) and Rust once; wall and CPU time.",
+            json!({ "runs": { "type": "integer", "default": 5, "description": "rounds" }, "path": path }),
             json!([])
         ),
         tool(

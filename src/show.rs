@@ -1,6 +1,6 @@
 //! How results look in the terminal.
 
-use crate::bench::BenchResult;
+use crate::bench::{BenchResult, OUTPUT_VARIES, Verdict};
 use crate::pipeline::{PortOut, ScanOut};
 use crate::report::ReportOut;
 use crate::state::{Ctx, Verify};
@@ -175,16 +175,39 @@ pub fn bench(b: &BenchResult) {
         secs(b.after.median)
     ));
     ui::line("");
+    let (word, x, lo, hi) = if b.speedup >= 1.0 {
+        ("faster", b.speedup, b.speedup_q1, b.speedup_q3)
+    } else {
+        ("slower", 1.0 / b.speedup, 1.0 / b.speedup_q3, 1.0 / b.speedup_q1)
+    };
+    let headline = bold(format!("{} {word}", times(x)));
+    let mut detail = format!("median of {} rounds, {}–{}", b.runs, times(lo).trim_end_matches('×'), times(hi));
+    if let Some(cpu) = b.cpu_note() {
+        detail.push_str(&format!("; {cpu}"));
+    }
+    let noise = b.aa.band();
+    detail.push_str(&format!("; A/A ±{noise:.1}%"));
     ui::ok(format!(
         "{} is {} end to end {}",
         bold(cmd),
-        rust(bold(format!("{} faster", times(b.speedup)))),
-        dim(format!("(median of {}, ±{})", b.runs, secs(b.after.stddev.max(b.before.stddev))))
+        if word == "faster" { rust(headline) } else { red(headline) },
+        dim(format!("({detail})"))
     ));
-    if let Some(diff) = &b.output_diff {
-        ui::warn(format!(
-            "the app printed something else with the Rust ports ({diff}). Fine if its output varies from run to run; otherwise a port behaves differently from the original"
-        ));
+    match b.verdict {
+        Some(Verdict::Noise) => ui::warn(format!(
+            "that's within run-to-run noise: the original alone varies by up to ±{noise:.1}% between runs. More rounds may settle it:  fast-anything bench --runs 15"
+        )),
+        Some(Verdict::Slower) => ui::warn(format!(
+            "the app is slower with the Rust ports, beyond its own run-to-run noise (±{noise:.1}%). See which port costs more than it saves:  fast-anything status"
+        )),
+        Some(Verdict::Faster) | None => {}
+    }
+    match &b.output_diff {
+        Some(diff) if diff == OUTPUT_VARIES => ui::warn(diff),
+        Some(diff) => ui::warn(format!(
+            "the app printed something else with the Rust ports ({diff}), while every run of the original printed the same: a port behaves differently from the original"
+        )),
+        None => {}
     }
 }
 
