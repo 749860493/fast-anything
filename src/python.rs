@@ -56,18 +56,68 @@ pub fn unwrap_env_runner(command: &[String], query: impl Fn(&[&str]) -> Result<S
     Ok(Some(std::iter::once(exe).chain(rest.iter().cloned()).collect()))
 }
 
+/// Whether `arg` is a Windows Python Launcher (`py`) version selector such as `-3`, `-3.13`,
+/// `-3.13-64`, `-3-arm64`, or `-V:3.13`. Excludes `-0`/`-0p` (`--list`) and plain Python flags.
+fn is_py_version_selector(arg: &str) -> bool {
+    if let Some(tag) = arg.strip_prefix("-V:") {
+        return !tag.is_empty();
+    }
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    let Some(first) = rest.as_bytes().first().copied() else {
+        return false;
+    };
+    if !matches!(first, b'1'..=b'9') {
+        return false;
+    }
+    let (ver, suffix) = match rest.find('-') {
+        Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+        None => (rest, None),
+    };
+    let valid_ver = match ver.split_once('.') {
+        Some((maj, min)) => {
+            !maj.is_empty()
+                && !min.is_empty()
+                && maj.bytes().all(|b| b.is_ascii_digit())
+                && min.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => ver.bytes().all(|b| b.is_ascii_digit()),
+    };
+    let valid_suffix = match suffix {
+        None => true,
+        Some(s) => !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric()),
+    };
+    valid_ver && valid_suffix
+}
+
+/// Split off a leading Windows Python Launcher (`py`) version selector.
+/// Only applies when `program` is `py`; `python`/`python3` and `py` without a selector are untouched.
+fn split_py_launcher_selector<'a>(program: &str, args: &'a [String]) -> (Option<&'a str>, &'a [String]) {
+    if crate::util::program_stem(program) == "py"
+        && let Some((first, rest)) = args.split_first()
+        && is_py_version_selector(first)
+    {
+        return (Some(first.as_str()), rest);
+    }
+    (None, args)
+}
+
 /// The absolute interpreter path behind python, python3, py, .venv/bin/python, ...
-pub fn resolve(program: &str, root: &Path) -> Result<String> {
+pub fn resolve(program: &str, args: &[String], root: &Path) -> Result<String> {
     if !is_python(program) {
         bail!(
             "fast-anything v0.1 speaks Python. Start the command with python, e.g.\n    fast-anything scan -- python app.py\n  (Node/TypeScript is next on the roadmap)"
         );
     }
     let prog = if program.contains(['/', '\\']) { root.join(program) } else { PathBuf::from(program) };
+    let selector = if cfg!(windows) { split_py_launcher_selector(program, args).0 } else { None };
+    let mut cmd = Command::new(&prog);
+    if let Some(sel) = selector {
+        cmd.arg(sel);
+    }
     let out = output(
-        Command::new(&prog)
-            .args(["-c", "import sys; print(sys.executable); print(*sys.version_info[:2])"])
-            .current_dir(root),
+        cmd.args(["-c", "import sys; print(sys.executable); print(*sys.version_info[:2])"]).current_dir(root),
         "python",
     )?;
     ensure!(out.status.success(), "{program} failed:\n{}", tail(&combined(&out), 5));
@@ -79,6 +129,20 @@ pub fn resolve(program: &str, root: &Path) -> Result<String> {
     ensure!(!exe.is_empty(), "couldn't find the interpreter behind {program}");
     ensure!(version.as_slice() >= &[3, 10][..], "Python 3.10 or newer is needed (found {version:?})");
     Ok(exe)
+}
+
+/// What bench runs for Python: the resolved interpreter with any Windows `py` launcher version
+/// selector stripped (the selector already picked the interpreter during `scan`, and `python.exe`
+/// rejects flags like `-3` or `-3.13`).
+pub fn bench_command(ctx: &Ctx, python: &str) -> Result<(String, Vec<String>)> {
+    let args = ctx.state.command.get(1..).unwrap_or_default();
+    let args = if cfg!(windows) {
+        let program = ctx.state.command.first().map(String::as_str).unwrap_or_default();
+        split_py_launcher_selector(program, args).1
+    } else {
+        args
+    };
+    Ok((python.to_string(), args.to_vec()))
 }
 
 fn helper(ctx: &Ctx, python: &str, mode: &str, job: Value, app_args: &[String]) -> Result<Output> {
@@ -1350,6 +1414,87 @@ sys.exit(1 if fails else 0)
         assert!(is_python("C:\\Python313\\python.exe"));
         assert!(is_python("py"));
         assert!(!is_python("node"));
+    }
+
+    #[test]
+    fn py_launcher_version_selectors_split_and_strip_for_bench() {
+        let argv = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        for (prog, raw, want_sel, want_rest) in [
+            ("py", "-3 app.py", Some("-3"), vec!["app.py"]),
+            ("py", "-3.13 app.py arg1", Some("-3.13"), vec!["app.py", "arg1"]),
+            ("py", "-V:3.13 -u app.py", Some("-V:3.13"), vec!["-u", "app.py"]),
+            ("py", "-3.13-64 app.py", Some("-3.13-64"), vec!["app.py"]),
+            ("C:\\Windows\\py.exe", "-V:PythonCore/3.13 app.py", Some("-V:PythonCore/3.13"), vec!["app.py"]),
+            ("py", "app.py", None, vec!["app.py"]),
+            ("py", "-u app.py", None, vec!["-u", "app.py"]),
+            ("py", "-0 app.py", None, vec!["-0", "app.py"]),
+            ("py", "-V app.py", None, vec!["-V", "app.py"]),
+            ("py", "-V: app.py", None, vec!["-V:", "app.py"]),
+            ("python", "-3 app.py", None, vec!["-3", "app.py"]),
+            ("python", "app.py", None, vec!["app.py"]),
+            ("python3", "-V:3.13 app.py", None, vec!["-V:3.13", "app.py"]),
+        ] {
+            let args = argv(raw);
+            let (sel, rest) = split_py_launcher_selector(prog, &args);
+            assert_eq!(sel, want_sel, "{prog} {raw}");
+            assert_eq!(rest, want_rest.as_slice(), "{prog} {raw}");
+        }
+
+        // Verify bench_command strips the selector on Windows and leaves non-Windows untouched.
+        let dir = std::env::temp_dir().join(format!("fa-py-bench-cmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut ctx = Ctx::open(&dir).unwrap();
+        ctx.state.runtime = Some("C:\\Python313\\python.exe".into());
+        for (cmd, win_want, non_win_want) in [
+            (argv("py -3 app.py"), argv("app.py"), argv("-3 app.py")),
+            (argv("py -3.13 app.py --flag"), argv("app.py --flag"), argv("-3.13 app.py --flag")),
+            (argv("py -V:3.13 -u app.py"), argv("-u app.py"), argv("-V:3.13 -u app.py")),
+            (argv("py app.py"), argv("app.py"), argv("app.py")),
+            (argv("python app.py"), argv("app.py"), argv("app.py")),
+        ] {
+            ctx.state.command = cmd.clone();
+            let (exe, got) = crate::backend::Lang::Python.bench_command(&ctx).unwrap();
+            assert_eq!(exe, "C:\\Python313\\python.exe");
+            let want = if cfg!(windows) { win_want } else { non_win_want };
+            assert_eq!(got, want, "{cmd:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn py_launcher_scan_and_bench_work_with_version_selectors() {
+        if !cfg!(windows) || !Command::new("py").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no Windows py launcher on PATH, skipping");
+            return;
+        }
+        let ver_out = Command::new("py")
+            .args(["-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"])
+            .output()
+            .unwrap();
+        assert!(ver_out.status.success());
+        let xy = String::from_utf8_lossy(&ver_out.stdout).trim().to_string();
+        let dir = std::env::temp_dir().join(format!("fa-py-launcher-e2e-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("work.py"), "def crunch(n: int) -> int:\n    return sum(i * i for i in range(n))\n")
+            .unwrap();
+        fs::write(dir.join("app.py"), "from work import crunch\nif __name__ == '__main__':\n    print(crunch(200))\n")
+            .unwrap();
+        for cmd in [
+            vec!["py".into(), "-3".into(), "app.py".into()],
+            vec!["py".into(), format!("-{xy}"), "app.py".into()],
+            vec!["py".into(), format!("-V:{xy}"), "app.py".into()],
+            vec!["py".into(), "app.py".into()],
+            vec!["python".into(), "app.py".into()],
+        ] {
+            crate::pipeline::scan(&dir, cmd.clone(), None).unwrap_or_else(|e| panic!("scan {cmd:?} failed: {e:#}"));
+            let ctx = Ctx::open(&dir).unwrap();
+            let (_, bench_args) = crate::backend::Lang::Python.bench_command(&ctx).unwrap();
+            assert_eq!(bench_args, ["app.py"], "bench args for {cmd:?}");
+            crate::pipeline::bench(&dir, 1).unwrap_or_else(|e| panic!("bench {cmd:?} failed: {e:#}"));
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     struct WorkerEnv {
