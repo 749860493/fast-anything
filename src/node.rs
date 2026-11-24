@@ -853,7 +853,9 @@ mod tests {
             eprintln!("no node on PATH, skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("fa-node-regex-lexer-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-node-regex-lexer-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // Put regexes with quotes, character-class slashes, and return-regex above a single hot
@@ -897,10 +899,12 @@ mod tests {
             eprintln!("no node on PATH, skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("fa-node-codeonly-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-node-codeonly-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        // Export codeOnly from a temporary copy of runner.mjs to assert exact blanking on tricky tokens
+        // Export codeOnly/describe from a temporary copy of runner.mjs to assert exact blanking on tricky tokens
         // (and verify linear time on adversarial unterminated-slash lines).
         let stripped = RUNNER.split("const [mode, jobPath]").next().unwrap();
         fs::write(dir.join("lib.mjs"), format!("{stripped}\nexport {{ codeOnly, describe }};\n")).unwrap();
@@ -909,29 +913,95 @@ mod tests {
             r#"import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { codeOnly, describe } from "./lib.mjs";
 
-// Division preserved intact
-assert.equal(codeOnly("const r = a / b / c;"), "const r = a / b / c;");
-assert.equal(codeOnly("const r = (a + b) / 2 / arr[0];"), "const r = (a + b) / 2 / arr[0];");
-assert.equal(codeOnly("const r = obj.return / 2;"), "const r = obj.return / 2;");
-assert.equal(codeOnly("const r = i++ / 2;"), "const r = i++ / 2;");
+const root = path.dirname(fileURLToPath(import.meta.url));
 
-// Division followed by line comment containing quotes
-const divComment = codeOnly("const x = y / 2 // it's a \"comment\"\nconst z = 1;");
-assert.equal(divComment.length, "const x = y / 2 // it's a \"comment\"\nconst z = 1;".length);
-assert.ok(divComment.startsWith("const x = y / 2 "));
-assert.ok(divComment.endsWith("\nconst z = 1;"));
+// Division preserved intact (two slashes on the same line pin every guard against regex misreads)
+for (const line of [
+  "const r = a / b / c;",
+  "const r = (a + b) / 2 / arr[0];",
+  "const r = arr[0] / 2 / 3;",
+  "const r = obj.return / 2 / 3;",
+  "const r = i++ / 2 / 3;",
+  "const r = i-- / 2 / 3;",
+  "const r = 10 / 2 / 3;",
+  "const r = 1.5 / 2 / 3;",
+  'const r = "10" / 2 / 3;',
+  "const r = of / 2 / 3;",
+  "const r = { a: 1 } / 2 / 3;",
+  "return { a: 1 } / 2 / 3;",
+  "const r = { a: () => { return 1; } } / 2 / 3;",
+  "const r = π / 2 / 3;",
+  "const r = 数量 / 2 / 3;",
+  "const r = a! / console.log(1) / 2;",
+  "const r = a!! / 2 / 3;",
+]) {
+  assert.equal(codeOnly(line), line.replace('"10"', '"  "'), `division misread: ${line}`);
+}
+assert.equal(codeOnly("const r = /a/ / 2 / 3;"), "const r = / / / 2 / 3;");
 
-// Regex literals with quotes, slashes in character class, escapes, and after keywords
+// Division followed by a quoted line comment (must not pair `/` with `//`)
+for (const prefix of [
+  "const x = y / 2",
+  "const x = obj.return / 2",
+  "const x = i++ / 2",
+  "const x = of / 2",
+  "const x = { a: 1 } / 2",
+  "const x = π / 2",
+  "const x = m.get('a')! / 2",
+]) {
+  const src = `${prefix}; // don't "break"\nconst z = 1;`;
+  const res = codeOnly(src);
+  assert.equal(res.length, src.length, `length drift for ${prefix}`);
+  assert.ok(res.startsWith(`${prefix.replace("'a'", "' '")}; `), `prefix damaged: ${res}`);
+  assert.ok(res.endsWith("\nconst z = 1;"), `next line swallowed for ${prefix}: ${res}`);
+}
+
+// Regex literals: start-of-file, quotes, char-class slashes, escapes, flags, keywords, blocks, prefix `!`
+assert.equal(codeOnly("/'/.test(s);"), "/ /.test(s);");
+assert.equal(codeOnly("/>/.test(s);"), "/ /.test(s);");
+assert.equal(codeOnly("a < /'/.source.length;"), "a < / /.source.length;");
 assert.equal(codeOnly("s.replace(/['\"]/g, \"\")"), "s.replace(/    /g, \"\")");
 assert.equal(codeOnly("s.replace(/[/]/g, \"-\")"), "s.replace(/   /g, \" \")");
-assert.equal(codeOnly("return /'/.test(s);"), "return / /.test(s);");
 assert.equal(codeOnly("return /https?:\\/\\//.test(s);"), "return /           /.test(s);");
 assert.equal(codeOnly("const t = `a / b / 'c'`;\nconst ok = 1;"), "const t = `           `;\nconst ok = 1;");
 
+for (const [src, expected] of [
+  ["return /'/.test(s);", "return / /.test(s);"],
+  ["case /'/: break;", "case / /: break;"],
+  ["throw /'/;", "throw / /;"],
+  ["typeof /'/", "typeof / /"],
+  ["void /'/", "void / /"],
+  ["delete /'/", "delete / /"],
+  ["new /'/", "new / /"],
+  ["yield /'/", "yield / /"],
+  ["await /'/", "await / /"],
+  ["if (a) b(); else /'/.test(s);", "if (a) b(); else / /.test(s);"],
+  ["do /'/.test(s); while (0);", "do / /.test(s); while (0);"],
+  ["x in /'/", "x in / /"],
+  ["function foo() {} /'/.test(s);", "function foo() {} / /.test(s);"],
+  ["if (ok) { a(); } /'/.test(s);", "if (ok) { a(); } / /.test(s);"],
+  ["const f = () => { return 1; } /'/.test(s);", "const f = () => { return 1; } / /.test(s);"],
+  ["class C {} /'/.test(s);", "class C {} / /.test(s);"],
+  ["class C extends ns.Base {} /'/.test(s);", "class C extends ns.Base {} / /.test(s);"],
+  ["if (!/'/.test(s)) {}", "if (!/ /.test(s)) {}"],
+  ["foo()\n!/'/.test(s);", "foo()\n!/ /.test(s);"],
+  ["foo() /*\n*/ !/'/.test(s);", "foo()   \n   !/ /.test(s);"],
+  ["a != /'/.source;", "a != / /.source;"],
+  ["a !== /'/.source;", "a !== / /.source;"],
+]) {
+  assert.equal(codeOnly(src), expected, `regex misread: ${src}`);
+}
+
+// Unterminated `/` on a line never crosses LF, CRLF, or trailing backslash before newline
+assert.equal(codeOnly("x = /a\nconst b = 1 / 2;"), "x = /a\nconst b = 1 / 2;");
+assert.equal(codeOnly("x = /a\r\nconst b = 1 / 2;"), "x = /a\r\nconst b = 1 / 2;");
+assert.equal(codeOnly("x = /a\\\nconst b = /'/;"), "x = /a\\\nconst b = / /;");
+
 // Escaped quotes inside regex and comments don't leak into later functions
-const modFile = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "sample.mjs");
+const modFile = path.join(root, "sample.mjs");
 const sample = [
   "export function f1(s) { return s.replace(/['\"]/g, ''); }",
   "export function f2(s) { return s.replace(/[/]/g, '-'); }",
@@ -941,21 +1011,58 @@ const sample = [
   "export function f6(s) { const t = `a / b`; return t + s; }",
 ].join("\n") + "\n";
 fs.writeFileSync(modFile, sample);
-const root = path.dirname(modFile);
 for (const [line0, name] of [[0, "f1"], [1, "f2"], [2, "f3"], [3, "f4"], [4, "f5"], [6, "f6"]]) {
   const info = describe(modFile, line0, name, null, root);
   assert.ok(info, `describe missed ${name}`);
   assert.deepEqual(info.blockers, [], `${name} had unexpected blockers: ${info.blockers}`);
 }
 
-// Adversarial inputs with unterminated slashes (plain and unclosed character class) stay linear and preserve later code
+// JSX closing tags (`</tag>`, `</>`) and self-closing tags (`/>`) must not be misread as regex
+const jsxFile = path.join(root, "sample.jsx");
+const jsxSample = [
+  'export function ViewA() { return <span>Home</span><a href="/about">About</a>; }',
+  "export function afterA(x) { return x + 1; }",
+  "export function ViewB() { return <span>a</span><span>{console.log(1)}</span>; }",
+  "export function ViewC(a) { return <div><span>a</span>{a && <span>b</span>}</div>; }",
+  "export function ViewD() { return <Icon size={16} /><button onClick={() => console.log(1)}>ok</button>; }",
+  "export function ViewFrag() { return <><span>a</span></>; }",
+  "export function afterFrag(x) { return x + 2; }",
+].join("\n") + "\n";
+fs.writeFileSync(jsxFile, jsxSample);
+for (const [line0, name] of [[1, "afterA"], [3, "ViewC"], [6, "afterFrag"]]) {
+  const info = describe(jsxFile, line0, name, null, root);
+  assert.ok(info, `describe missed JSX ${name}`);
+  assert.deepEqual(info.blockers, [], `JSX ${name} had unexpected blockers: ${info.blockers}`);
+}
+for (const [line0, name] of [[2, "ViewB"], [4, "ViewD"]]) {
+  const info = describe(jsxFile, line0, name, null, root);
+  assert.ok(info, `describe missed JSX ${name}`);
+  assert.ok(info.blockers.some((b) => b.includes("console")), `JSX ${name} lost console blocker: ${info.blockers}`);
+}
+
+// TypeScript postfix non-null assertion `!` before `/` must not swallow following functions or console I/O
+const tsxFile = path.join(root, "sample.tsx");
+const tsxSample = [
+  "export function tsDiv(m) { const x = m.get('a')! / 2; // don't break",
+  "  return x; }",
+  "export function afterTs(x) { return x + 1; }",
+  "export function tsConsole(a) { return a! / console.log(1) / 2; }",
+].join("\n") + "\n";
+fs.writeFileSync(tsxFile, tsxSample);
+const afterTs = describe(tsxFile, 2, "afterTs", null, root);
+assert.ok(afterTs, "describe missed afterTs");
+assert.deepEqual(afterTs.blockers, [], `afterTs had unexpected blockers: ${afterTs.blockers}`);
+const tsConsole = describe(tsxFile, 3, "tsConsole", null, root);
+assert.ok(tsConsole, "describe missed tsConsole");
+assert.ok(tsConsole.blockers.some((b) => b.includes("console")), `tsConsole lost console blocker: ${tsConsole.blockers}`);
+
+// Adversarial inputs with unterminated slashes (odd repeat count prevents even-pairing false passes)
 for (const worst of [
-  "x = /a\n".repeat(5000) + "const ok = 1;",
+  "x = /a\n".repeat(5001) + "const ok = 1;",
   "x = /[".repeat(10000) + "\nconst ok = 1;",
 ]) {
   const res = codeOnly(worst);
-  assert.equal(res.length, worst.length);
-  assert.ok(res.endsWith("\nconst ok = 1;"));
+  assert.equal(res, worst);
 }
 "#,
         )
