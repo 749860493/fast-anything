@@ -951,13 +951,7 @@ fn c_record_prologue(hs: &Hotspot) -> Result<String> {
     let ret = hs.returns.clone().unwrap_or_default();
     let names = arg_names(hs);
     let puts = |sub: Option<(usize, &str)>| -> String {
-        kinds
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| **k != CKind::Len)
-            .map(|(i, k)| c_put(k, &names[i], &hs.params, sub, i))
-            .collect::<Vec<_>>()
-            .join(" ")
+        kinds.iter().enumerate().map(|(i, k)| c_put(k, &names[i], &hs.params, sub, i)).collect::<Vec<_>>().join(" ")
     };
     let call = |sub: &[(usize, String)]| -> String {
         let args: Vec<String> = names
@@ -992,6 +986,8 @@ fn c_record_prologue(hs: &Hotspot) -> Result<String> {
         let mut put_line = String::new();
         for (j, kk) in kinds.iter().enumerate() {
             if *kk == CKind::Len {
+                let n = if len_sub == Some(j) { "fa_n" } else { names[j].as_str() };
+                put_line.push_str(&format!("fa_rec_i64((long long) ({n})); "));
                 continue;
             }
             let p = match kk {
@@ -1384,6 +1380,61 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compiles `source` with the recording prologue of its function `name` and runs it; returns
+    /// the recordings, or None without a C compiler.
+    fn record_c(source: &str, name: &str) -> Option<Vec<Value>> {
+        let cc = ["cc", "gcc", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())?;
+        let f = parse(source).into_iter().find(|f| f.name == name).unwrap();
+        let hs = Hotspot {
+            name: f.name.clone(),
+            params: f.params.clone(),
+            returns: Some(f.ret.clone()),
+            ..Hotspot::default()
+        };
+        let dir = std::env::temp_dir().join(format!("fa-c-rec-test-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for (file, text) in [("fa_clock.h", CLOCK_H), ("fa_rec.h", REC_H), ("fa_rec.c", REC_C)] {
+            fs::write(dir.join(file), text).unwrap();
+        }
+        let prologue = c_record_prologue(&hs).unwrap().replace('\n', " ");
+        fs::write(dir.join("app.c"), insert_at(source, vec![(f.body_open + 1, format!(" {prologue}"))])).unwrap();
+        let built = Command::new(cc)
+            .args(["-O1", "-include", "fa_rec.h", "app.c", "fa_rec.c", "-o", "app"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let ran = Command::new(dir.join("app"))
+            .current_dir(&dir)
+            .env("FAST_ANYTHING_RECORD_OUT", dir.join("rec.jsonl"))
+            .env("FAST_ANYTHING_RECORD_META", dir.join("meta.json"))
+            .output()
+            .unwrap();
+        let text = fs::read_to_string(dir.join("rec.jsonl")).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        Some(text.lines().map(|l| serde_json::from_str(l).unwrap()).collect())
+    }
+
+    #[test]
+    fn c_recordings_carry_every_parameter() {
+        // the port's glue and the bridge take the array's length as an argument of its own
+        let source = "#include <stddef.h>\nlong total(const int *xs, size_t n, int scale)\n{\n    long s = 0;\n    for (size_t i = 0; i < n; i++) s += xs[i] * scale;\n    return s;\n}\nint main(void) {\n    int xs[40];\n    for (int i = 0; i < 40; i++) xs[i] = i;\n    long t = 0;\n    for (int k = 0; k < 5; k++) t += total(xs, 30 + k, k);\n    return t > 0 ? 0 : 1;\n}\n";
+        let Some(cases) = record_c(source, "total") else {
+            eprintln!("no C compiler on PATH, skipping");
+            return;
+        };
+        assert!(cases.iter().any(|c| c.get("derived").is_some()), "no derived cases: {cases:?}");
+        for c in &cases {
+            let args = c["args"].as_array().unwrap();
+            assert_eq!(args.len(), 3, "{c}");
+            let (xs, n, scale) = (args[0].as_array().unwrap(), args[1].as_u64().unwrap(), args[2].as_i64().unwrap());
+            assert_eq!(xs.len() as u64, n, "{c}");
+            let sum: i64 = xs.iter().map(|x| x.as_i64().unwrap() * scale).sum();
+            assert_eq!(c["result"].as_i64(), Some(sum), "{c}");
+        }
+    }
 
     #[test]
     fn finds_c_and_cpp_functions() {
