@@ -617,7 +617,11 @@ def describe(path, line, name, entry, base):
     # the same calls through an import: `sp.run` is subprocess.run, `system` is os.system
     for target, origins in resolved_calls(node, module_level_names):
         head = target[0]
-        if (head in IO_NAMES if len(target) == 1 else head in IO_MODULES or head in NONDET_MODULES):
+        if (
+            head in IO_NAMES
+            if len(target) == 1
+            else (head in IO_MODULES or head in NONDET_MODULES) and not is_pure_call(".".join(target))
+        ):
             continue  # already caught by name
         for origin in origins:
             effect = origin and resolved_effect(list(origin) + target[1:])

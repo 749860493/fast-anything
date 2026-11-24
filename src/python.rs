@@ -1079,7 +1079,8 @@ sys.exit(1 if fails else 0)
              def impure_listdir(p: str) -> int:\n    return len(os.listdir(p)) if False else len(p)\n\n\
              def impure_now(n: int) -> int:\n    return datetime.datetime.now().year + n\n\n\
              def impure_uuid4(n: int) -> int:\n    return len(str(uuid.uuid4())) + n\n\n\
-             def impure_urlopen(u: str) -> int:\n    if False:\n        urllib.request.urlopen(u)\n    return len(u)\n",
+             def impure_urlopen(u: str) -> int:\n    if False:\n        urllib.request.urlopen(u)\n    return len(u)\n\n\
+             def impure_aliased_time() -> float:\n    import time as datetime\n    return datetime.time()\n",
         )
         .unwrap();
         fs::write(
@@ -1097,7 +1098,8 @@ sys.exit(1 if fails else 0)
              \x20       work.impure_listdir('.')\n\
              \x20       work.impure_now(i)\n\
              \x20       work.impure_uuid4(i)\n\
-             \x20       work.impure_urlopen('https://example.com')\n",
+             \x20       work.impure_urlopen('https://example.com')\n\
+             \x20       work.impure_aliased_time()\n",
         )
         .unwrap();
         let scanned = crate::pipeline::scan(&dir, vec![python.into(), "app.py".into()], None);
@@ -1117,6 +1119,7 @@ sys.exit(1 if fails else 0)
             ("impure_now", "not deterministic: datetime.datetime.now"),
             ("impure_uuid4", "not deterministic: uuid.uuid4"),
             ("impure_urlopen", "does I/O: urllib.request.urlopen"),
+            ("impure_aliased_time", "not deterministic: time.time"),
         ] {
             let h = by_name(impure);
             assert!(!h.portable(), "{impure} must stay blocked");
