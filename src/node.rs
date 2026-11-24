@@ -538,7 +538,7 @@ fn is_esm(root: &Path, file: &Path) -> bool {
     let mut dir = file.parent();
     while let Some(d) = dir {
         if let Ok(text) = fs::read_to_string(d.join("package.json")) {
-            return serde_json::from_str::<Value>(&text)
+            return serde_json::from_str::<Value>(text.strip_prefix('\u{feff}').unwrap_or(&text))
                 .ok()
                 .and_then(|v| v["type"].as_str().map(|t| t == "module"))
                 .unwrap_or(false);
@@ -865,8 +865,18 @@ mod tests {
                     .as_slice(),
             ),
         ];
-        let base = std::env::temp_dir().join(format!("fa-node-bom-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let base = tmp.join(format!("fa-node-bom-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
+        // Bare `const` after line-1 BOM matches, while non-line-1 U+FEFF is not skipped.
+        assert_eq!(declaration("\u{feff}const crunch = (n) => n;\n", "const", "crunch"), Some("\u{feff}".len()));
+        assert_eq!(declaration("const a = 1;\n\u{feff}const crunch = (n) => n;\n", "const", "crunch"), None);
+        // package.json with UTF-8 BOM is still recognized as ESM.
+        let pkg_dir = base.join("bom-pkg");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("package.json"), b"\xef\xbb\xbf{\"type\": \"module\"}\r\n").unwrap();
+        assert!(is_esm(&pkg_dir, &pkg_dir.join("work.js")));
         for (name, work_bytes) in cases {
             let dir = base.join(name);
             fs::create_dir_all(&dir).unwrap();
@@ -897,10 +907,15 @@ mod tests {
                     "{name}: const must switch to let after BOM: {text}"
                 );
             }
+            assert!(!Ctx::open(&dir).unwrap().stale(port), "{name}: enabled BOM port must not be reported stale");
             crate::pipeline::disable(&dir, Some("work.crunch")).unwrap();
             let restored_bytes = fs::read(dir.join("work.mjs")).unwrap();
-            let _ = fs::remove_dir_all(&dir);
             assert_eq!(restored_bytes, work_bytes, "{name}: disable must restore BOM file byte for byte");
+            let edited = String::from_utf8_lossy(work_bytes).replace("let t = 0;", "let t = 1;");
+            fs::write(dir.join("work.mjs"), edited.as_bytes()).unwrap();
+            let stale_after_edit = Ctx::open(&dir).unwrap().stale(port);
+            let _ = fs::remove_dir_all(&dir);
+            assert!(stale_after_edit, "{name}: editing first-line BOM function must trigger stale detection");
         }
         let _ = fs::remove_dir_all(&base);
     }

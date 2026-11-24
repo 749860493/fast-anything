@@ -461,9 +461,12 @@ mod tests {
         let two = append_marked(&append_marked("a\n", "#", "one", "1"), "#", "two", "2");
         assert_eq!(strip_marked(&strip_marked(&two, "#", "one"), "#", "two"), "a\n");
 
-        // Leading UTF-8 BOM on line 1 is preserved when inserting and stripping a block.
+        // Leading UTF-8 BOM on line 1 is preserved when inserting and stripping a block,
+        // while indented BOM lines and non-line-1 BOM characters are not treated as top-level guards.
         let bom_main = "\u{feff}if __name__ == \"__main__\":\r\n    main()\r\n";
         assert_eq!(guard(bom_main), Some("\u{feff}".len()));
+        assert_eq!(guard("\u{feff}    if __name__ == \"__main__\":\r\n    main()\r\n"), None);
+        assert_eq!(guard("x = 1\n\u{feff}if __name__ == \"__main__\":\n    main()\n"), None);
         let bom_on = insert_marked(bom_main, "#", "m.f", "f = g", guard);
         assert!(bom_on.starts_with('\u{feff}'));
         assert_eq!(strip_marked(&bom_on, "#", "m.f"), bom_main);

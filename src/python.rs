@@ -1361,7 +1361,9 @@ sys.exit(1 if fails else 0)
             eprintln!("no python on PATH, skipping");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("fa-py-bom-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-py-bom-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let work_bytes = b"\xef\xbb\xbfdef crunch(n: int) -> int:\r\n    t = 0\r\n    for i in range(n):\r\n        t += (i * i) % 97\r\n    return t\r\n";
@@ -1382,10 +1384,15 @@ sys.exit(1 if fails else 0)
         crate::pipeline::enable(&dir, Some("work.crunch"), true).unwrap();
         let enabled_bytes = fs::read(dir.join("work.py")).unwrap();
         assert!(enabled_bytes.starts_with(b"\xef\xbb\xbf"), "enable must preserve UTF-8 BOM");
+        assert!(!Ctx::open(&dir).unwrap().stale(port), "enabled BOM port must not be reported stale");
         crate::pipeline::disable(&dir, Some("work.crunch")).unwrap();
         let restored_bytes = fs::read(dir.join("work.py")).unwrap();
-        let _ = fs::remove_dir_all(&dir);
         assert_eq!(restored_bytes, work_bytes, "disable must restore BOM file byte for byte");
+        let edited = String::from_utf8_lossy(work_bytes).replace("t = 0", "t = 1");
+        fs::write(dir.join("work.py"), edited.as_bytes()).unwrap();
+        let stale_after_edit = Ctx::open(&dir).unwrap().stale(port);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(stale_after_edit, "editing first-line BOM function must trigger stale detection");
     }
 
     struct WorkerEnv {
