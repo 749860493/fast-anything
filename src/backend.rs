@@ -401,10 +401,11 @@ pub fn insert_marked(text: &str, comment: &str, id: &str, body: &str, at: impl F
 pub fn line_starting(text: &str, prefixes: &[&str]) -> Option<usize> {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
-        let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-        let top_level = !line.starts_with([' ', '\t']);
+        let body = if offset == 0 { line.strip_prefix('\u{feff}').unwrap_or(line) } else { line };
+        let squashed: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let top_level = !body.starts_with([' ', '\t']);
         if top_level && prefixes.iter().any(|p| squashed.starts_with(p)) {
-            return Some(offset);
+            return Some(offset + line.len() - body.len());
         }
         offset += line.len();
     }
@@ -459,5 +460,15 @@ mod tests {
         }
         let two = append_marked(&append_marked("a\n", "#", "one", "1"), "#", "two", "2");
         assert_eq!(strip_marked(&strip_marked(&two, "#", "one"), "#", "two"), "a\n");
+
+        // Leading UTF-8 BOM on line 1 is preserved when inserting and stripping a block,
+        // while indented BOM lines and non-line-1 BOM characters are not treated as top-level guards.
+        let bom_main = "\u{feff}if __name__ == \"__main__\":\r\n    main()\r\n";
+        assert_eq!(guard(bom_main), Some("\u{feff}".len()));
+        assert_eq!(guard("\u{feff}    if __name__ == \"__main__\":\r\n    main()\r\n"), None);
+        assert_eq!(guard("x = 1\n\u{feff}if __name__ == \"__main__\":\n    main()\n"), None);
+        let bom_on = insert_marked(bom_main, "#", "m.f", "f = g", guard);
+        assert!(bom_on.starts_with('\u{feff}'));
+        assert_eq!(strip_marked(&bom_on, "#", "m.f"), bom_main);
     }
 }

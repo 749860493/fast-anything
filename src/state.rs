@@ -79,13 +79,14 @@ pub struct Verify {
 /// The forms a source may take in the file: as recorded, or with const and let swapped (a Node
 /// port switches its function's const to let while enabled).
 fn forms(source: &str) -> [String; 3] {
-    let source = source.replace("\r\n", "\n");
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source).replace("\r\n", "\n");
     [source.replacen("const ", "let ", 1), source.replacen("let ", "const ", 1), source]
 }
 
 /// The file without fast-anything's own marked blocks: an enabled Java, Go, C#, C/C++, PHP or
 /// Kotlin port puts one inside the function's body, and that isn't a change to the original.
 fn without_blocks(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = String::with_capacity(text.len());
     let mut inside = false;
     for line in text.split_inclusive('\n') {
@@ -267,5 +268,15 @@ mod tests {
         let edited = file.replace("return x", "return x + 1");
         assert!(!found(&edited, &kept[0]), "an edited function is no longer found");
         assert!(found(&format!("x = 1\n{}", kept[0]), &kept[0]), "at the end of a file without a final newline");
+
+        // Leading UTF-8 BOM in either the file or the recorded source matches symmetrically.
+        let bom_file = "\u{feff}def f(x):\n    return x\n";
+        let plain_src = "def f(x):\n    return x";
+        let bom_src = "\u{feff}def f(x):\n    return x";
+        assert_eq!(verbatim(bom_file, &[plain_src]), [plain_src]);
+        assert_eq!(verbatim(bom_file, &[bom_src]), [plain_src]);
+        assert!(found(bom_file, plain_src));
+        assert!(found(bom_file, bom_src));
+        assert!(!found(&bom_file.replace("return x", "return x + 1"), plain_src));
     }
 }

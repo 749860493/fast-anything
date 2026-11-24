@@ -1410,6 +1410,49 @@ sys.exit(1 if fails else 0)
         assert!(!is_python("node"));
     }
 
+    #[test]
+    fn utf8_bom_python_file_scans_enables_and_restores_byte_for_byte() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-py-bom-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let work_bytes = b"\xef\xbb\xbfdef crunch(n: int) -> int:\r\n    t = 0\r\n    for i in range(n):\r\n        t += (i * i) % 97\r\n    return t\r\n";
+        fs::write(dir.join("work.py"), work_bytes).unwrap();
+        fs::write(
+            dir.join("app.py"),
+            b"\xef\xbb\xbffrom work import crunch\r\nif __name__ == '__main__':\r\n    print(sum(crunch(500) for _ in range(50)))\r\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&dir, vec![python.into(), "app.py".into()], None).unwrap();
+        let h = scanned.hotspots.iter().find(|h| h.name == "crunch").expect("BOM python file should appear in scan");
+        assert!(h.portable(), "crunch should be portable, got {:?}", h.blockers);
+        crate::pipeline::port(&dir, Some("work.crunch"), 10).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let port = &ctx.state.ports["work.crunch"];
+        assert!(!port.sources.is_empty(), "verbatim source should be captured for BOM file");
+        assert!(!ctx.stale(port), "fresh BOM port must not be reported stale");
+        crate::pipeline::enable(&dir, Some("work.crunch"), true).unwrap();
+        let enabled_bytes = fs::read(dir.join("work.py")).unwrap();
+        assert!(enabled_bytes.starts_with(b"\xef\xbb\xbf"), "enable must preserve UTF-8 BOM");
+        assert!(!Ctx::open(&dir).unwrap().stale(port), "enabled BOM port must not be reported stale");
+        crate::pipeline::disable(&dir, Some("work.crunch")).unwrap();
+        let restored_bytes = fs::read(dir.join("work.py")).unwrap();
+        assert_eq!(restored_bytes, work_bytes, "disable must restore BOM file byte for byte");
+        let edited = String::from_utf8_lossy(work_bytes).replace("t = 0", "t = 1");
+        fs::write(dir.join("work.py"), edited.as_bytes()).unwrap();
+        let stale_after_edit = Ctx::open(&dir).unwrap().stale(port);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(stale_after_edit, "editing first-line BOM function must trigger stale detection");
+    }
+
     struct WorkerEnv {
         python: &'static str,
         dir: PathBuf,

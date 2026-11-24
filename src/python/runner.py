@@ -255,7 +255,7 @@ _files = {}
 def parse_file(path):
     if path not in _files:
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(path, encoding="utf-8-sig") as f:
                 src = f.read()
             tree = ast.parse(src)
         except (OSError, SyntaxError, UnicodeDecodeError, ValueError):

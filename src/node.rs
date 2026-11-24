@@ -538,7 +538,7 @@ fn is_esm(root: &Path, file: &Path) -> bool {
     let mut dir = file.parent();
     while let Some(d) = dir {
         if let Ok(text) = fs::read_to_string(d.join("package.json")) {
-            return serde_json::from_str::<Value>(&text)
+            return serde_json::from_str::<Value>(text.strip_prefix('\u{feff}').unwrap_or(&text))
                 .ok()
                 .and_then(|v| v["type"].as_str().map(|t| t == "module"))
                 .unwrap_or(false);
@@ -663,7 +663,7 @@ fn declaration(text: &str, keyword: &str, name: &str) -> Option<usize> {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
-        let mut rest = line;
+        let mut rest = if offset == 0 { line.strip_prefix('\u{feff}').unwrap_or(line) } else { line };
         if let Some(r) = rest.strip_prefix("export").filter(|r| r.starts_with([' ', '\t'])) {
             rest = r.trim_start();
         }
@@ -709,6 +709,79 @@ fn without_shim(text: &str, port: &Port) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_bom_node_file_scans_enables_and_restores_byte_for_byte() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let cases = [
+            (
+                "func",
+                b"\xef\xbb\xbfexport function crunch(n) {\r\n  let t = 0;\r\n  for (let i = 0; i < n; i++) t += (i * i) % 97;\r\n  return t;\r\n}\r\n"
+                    .as_slice(),
+            ),
+            (
+                "const",
+                b"\xef\xbb\xbfexport const crunch = (n) => {\r\n  let t = 0;\r\n  for (let i = 0; i < n; i++) t += (i * i) % 97;\r\n  return t;\r\n};\r\n"
+                    .as_slice(),
+            ),
+        ];
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let base = tmp.join(format!("fa-node-bom-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        // Bare `const` after line-1 BOM matches, while non-line-1 U+FEFF is not skipped.
+        assert_eq!(declaration("\u{feff}const crunch = (n) => n;\n", "const", "crunch"), Some("\u{feff}".len()));
+        assert_eq!(declaration("const a = 1;\n\u{feff}const crunch = (n) => n;\n", "const", "crunch"), None);
+        // package.json with UTF-8 BOM is still recognized as ESM.
+        let pkg_dir = base.join("bom-pkg");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("package.json"), b"\xef\xbb\xbf{\"type\": \"module\"}\r\n").unwrap();
+        assert!(is_esm(&pkg_dir, &pkg_dir.join("work.js")));
+        for (name, work_bytes) in cases {
+            let dir = base.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("work.mjs"), work_bytes).unwrap();
+            fs::write(
+                dir.join("app.mjs"),
+                b"\xef\xbb\xbfimport { crunch } from './work.mjs';\r\nlet s = 0;\r\nfor (let r = 0; r < 200; r++) s += crunch(100000);\r\nconsole.log(s);\r\n",
+            )
+            .unwrap();
+            let scanned = crate::pipeline::scan(&dir, vec!["node".into(), "app.mjs".into()], None).unwrap();
+            let h =
+                scanned.hotspots.iter().find(|h| h.name == "crunch").unwrap_or_else(|| {
+                    panic!("{name}: BOM node file should appear in scan, got {:?}", scanned.hotspots)
+                });
+            assert!(h.portable(), "{name}: crunch should be portable, got {:?}", h.blockers);
+            crate::pipeline::port(&dir, Some("work.crunch"), 10).unwrap();
+            let ctx = Ctx::open(&dir).unwrap();
+            let port = &ctx.state.ports["work.crunch"];
+            assert!(!port.sources.is_empty(), "{name}: verbatim source should be captured for BOM file");
+            assert!(!ctx.stale(port), "{name}: fresh BOM port must not be reported stale");
+            crate::pipeline::enable(&dir, Some("work.crunch"), true).unwrap();
+            let enabled_bytes = fs::read(dir.join("work.mjs")).unwrap();
+            assert!(enabled_bytes.starts_with(b"\xef\xbb\xbf"), "{name}: enable must preserve UTF-8 BOM");
+            if name == "const" {
+                let text = String::from_utf8_lossy(&enabled_bytes);
+                assert!(
+                    text.starts_with("\u{feff}export let crunch"),
+                    "{name}: const must switch to let after BOM: {text}"
+                );
+            }
+            assert!(!Ctx::open(&dir).unwrap().stale(port), "{name}: enabled BOM port must not be reported stale");
+            crate::pipeline::disable(&dir, Some("work.crunch")).unwrap();
+            let restored_bytes = fs::read(dir.join("work.mjs")).unwrap();
+            assert_eq!(restored_bytes, work_bytes, "{name}: disable must restore BOM file byte for byte");
+            let edited = String::from_utf8_lossy(work_bytes).replace("let t = 0;", "let t = 1;");
+            fs::write(dir.join("work.mjs"), edited.as_bytes()).unwrap();
+            let stale_after_edit = Ctx::open(&dir).unwrap().stale(port);
+            let _ = fs::remove_dir_all(&dir);
+            assert!(stale_after_edit, "{name}: editing first-line BOM function must trigger stale detection");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn scan_handles_regex_literals_and_division_ambiguity() {
