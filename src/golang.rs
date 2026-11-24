@@ -353,6 +353,19 @@ fn arg_list(hs: &Hotspot) -> String {
     hs.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+/// The parameters passed on to another call: a variadic one is spread again with `...`.
+fn call_args(hs: &Hotspot) -> String {
+    hs.params
+        .iter()
+        .map(|p| if is_variadic(p) { format!("{}...", p.name) } else { p.name.clone() })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_variadic(p: &Param) -> bool {
+    p.annotation.as_deref().is_some_and(|t| t.starts_with("..."))
+}
+
 fn ret(hs: &Hotspot) -> String {
     hs.returns.clone().unwrap_or_default()
 }
@@ -366,7 +379,10 @@ pub fn record(ctx: &Ctx, go: &str, args: &[String], hs: &Hotspot, out: &Path, li
         .params
         .iter()
         .enumerate()
-        .map(|(i, p)| format!("a[{i}].({})", p.annotation.as_deref().unwrap_or("any")))
+        .map(|(i, p)| match p.annotation.as_deref().and_then(|t| t.strip_prefix("...")) {
+            Some(item) => format!("a[{i}].([]{item})..."),
+            None => format!("a[{i}].({})", p.annotation.as_deref().unwrap_or("any")),
+        })
         .collect();
     let prologue = format!(
         "if !fastAnythingRecInside {{\n\treturn fastAnythingRec([]any{{{args}}}, func(a []any) any {{ return {name}({casts}) }}).({ret})\n}}",
@@ -408,6 +424,9 @@ pub fn record(ctx: &Ctx, go: &str, args: &[String], hs: &Hotspot, out: &Path, li
 /// Rust type for a Go type.
 pub fn rust_type(t: &str) -> Option<String> {
     let t = t.trim();
+    if let Some(item) = t.strip_prefix("...") {
+        return Some(format!("Vec<{}>", rust_type(item)?));
+    }
     Some(match t {
         "int" | "int64" => "i64".into(),
         "int32" | "rune" => "i32".into(),
@@ -498,7 +517,7 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
             .replace("/*RET*/", &ret(hs))
             .replace("/*LIB*/", &lib)
     };
-    let prologue = format!("if faR, faOK := faFast_{s}({}); faOK {{\n\treturn faR\n}}", arg_list(hs));
+    let prologue = format!("if faR, faOK := faFast_{s}({}); faOK {{\n\treturn faR\n}}", call_args(hs));
     let patched = native::insert_in_body(&text, "//", &port.id, &prologue, find_body(&port.func, hs.line))?;
     for (path, template) in bridge_files(&file, port)?.iter().zip([BRIDGE, BRIDGE_WINDOWS, BRIDGE_UNIX, BRIDGE_NOCGO]) {
         fs::write(path, fill(template))?;
@@ -521,6 +540,47 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variadic_functions_are_portable() {
+        if !Command::new("go").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no go on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-go-variadic-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), "module demo\n\ngo 1.22\n").unwrap();
+        let lib = "package main\n\nfunc total(scale int, xs ...int) int {\n\ts := 0\n\tfor _, x := range xs {\n\t\ts += x * scale\n\t}\n\treturn s\n}\n";
+        let main = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(total(2, 1, 2, 3), total(3), total(1, []int{4, 5}...))\n}\n";
+        fs::write(dir.join("lib.go"), lib).unwrap();
+        fs::write(dir.join("main.go"), main).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let f = describe(&ctx, "go").unwrap().into_iter().find(|f| f.name == "total").unwrap();
+        assert!(f.blockers.is_empty(), "{:?}", f.blockers);
+        assert_eq!(rust_type(f.params[1].annotation.as_deref().unwrap()).as_deref(), Some("Vec<i64>"));
+        let hs = Hotspot {
+            id: "main.total".into(),
+            file: "lib.go".into(),
+            line: 3,
+            name: "total".into(),
+            qualname: "total".into(),
+            params: f.params.clone(),
+            returns: f.returns.clone(),
+            ..Hotspot::default()
+        };
+        let out = dir.join("rec.jsonl");
+        let rec = record(&ctx, "go", &["run".into(), ".".into()], &hs, &out, 50);
+        let lines = fs::read_to_string(&out).unwrap_or_default();
+        let after = fs::read_to_string(dir.join("lib.go")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(rec.unwrap().calls, 3);
+        assert!(lines.contains(r#"{"args":[2,[1,2,3]],"result":12}"#), "{lines}");
+        assert!(
+            lines.contains(r#"{"args":[3,null],"result":0}"#) || lines.contains(r#"{"args":[3,[]],"result":0}"#),
+            "{lines}"
+        );
+        assert_eq!(after, lib);
+    }
 
     #[test]
     fn records_a_function_that_lives_next_to_main() {

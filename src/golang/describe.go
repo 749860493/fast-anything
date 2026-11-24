@@ -165,9 +165,8 @@ func describe(fset *token.FileSet, src []byte, path, pkg, pkgName string, fd *as
 	locals := map[string]bool{}
 	for _, field := range fd.Type.Params.List {
 		t := types.ExprString(field.Type)
-		if strings.HasPrefix(t, "...") {
-			fn.Blockers = append(fn.Blockers, "takes variadic arguments")
-		} else if !supported(t) {
+		// variadic: a slice inside the function, passed on with ... (the port takes a Vec)
+		if !supported(strings.TrimPrefix(t, "...")) {
 			fn.Blockers = append(fn.Blockers, "takes a "+t)
 		}
 		if len(field.Names) == 0 {
