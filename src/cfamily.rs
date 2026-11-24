@@ -1145,32 +1145,32 @@ fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
         }
         let n = &hs.params[i].name;
         if !first {
-            puts.push_str("    fa_put_S(&b, \",\");\n");
+            puts.push_str("    fa_put_S(&fa_b, \",\");\n");
         }
         first = false;
         puts.push_str(&match k {
-            CKind::Scalar(Scalar::Int { signed: true, .. }) | CKind::Len => format!("    fa_int_S(&b, (long long) ({n}));\n"),
-            CKind::Scalar(Scalar::Int { signed: false, .. }) => format!("    fa_uint_S(&b, (unsigned long long) ({n}));\n"),
-            CKind::Scalar(Scalar::Float(_)) => format!("    if (!fa_dbl_S(&b, (double) ({n}))) goto fallback;\n"),
-            CKind::Scalar(Scalar::Bool) => format!("    fa_put_S(&b, ({n}) ? \"true\" : \"false\");\n"),
-            CKind::Str => format!("    if (!fa_str_S(&b, {n})) goto fallback;\n"),
+            CKind::Scalar(Scalar::Int { signed: true, .. }) | CKind::Len => format!("    fa_int_S(&fa_b, (long long) ({n}));\n"),
+            CKind::Scalar(Scalar::Int { signed: false, .. }) => format!("    fa_uint_S(&fa_b, (unsigned long long) ({n}));\n"),
+            CKind::Scalar(Scalar::Float(_)) => format!("    if (!fa_dbl_S(&fa_b, (double) ({n}))) goto fa_fallback;\n"),
+            CKind::Scalar(Scalar::Bool) => format!("    fa_put_S(&fa_b, ({n}) ? \"true\" : \"false\");\n"),
+            CKind::Str => format!("    if (!fa_str_S(&fa_b, {n})) goto fa_fallback;\n"),
             CKind::Array(sc, len) => {
                 let l = &hs.params[*len].name;
                 let item = match sc {
-                    Scalar::Float(_) => format!("if (!fa_dbl_S(&b, (double) {n}[fa_i])) goto fallback;"),
-                    Scalar::Int { signed: true, .. } => format!("fa_int_S(&b, (long long) {n}[fa_i]);"),
-                    Scalar::Int { signed: false, .. } => format!("fa_uint_S(&b, (unsigned long long) {n}[fa_i]);"),
-                    Scalar::Bool => format!("fa_put_S(&b, {n}[fa_i] ? \"true\" : \"false\");"),
+                    Scalar::Float(_) => format!("if (!fa_dbl_S(&fa_b, (double) {n}[fa_i])) goto fa_fallback;"),
+                    Scalar::Int { signed: true, .. } => format!("fa_int_S(&fa_b, (long long) {n}[fa_i]);"),
+                    Scalar::Int { signed: false, .. } => format!("fa_uint_S(&fa_b, (unsigned long long) {n}[fa_i]);"),
+                    Scalar::Bool => format!("fa_put_S(&fa_b, {n}[fa_i] ? \"true\" : \"false\");"),
                 };
-                format!("    fa_put_S(&b, \"[\");\n    for (size_t fa_i = 0; fa_i < (size_t) ({l}); fa_i++) {{ if (fa_i) fa_put_S(&b, \",\"); {item} }}\n    fa_put_S(&b, \"]\");\n")
+                format!("    fa_put_S(&fa_b, \"[\");\n    for (size_t fa_i = 0; fa_i < (size_t) ({l}); fa_i++) {{ if (fa_i) fa_put_S(&fa_b, \",\"); {item} }}\n    fa_put_S(&fa_b, \"]\");\n")
             }
         });
     }
     let parse = match scalar(&ret) {
-        Some(Scalar::Bool) => "strncmp(ok, \"true\", 4) == 0".to_string(),
-        Some(Scalar::Float(_)) => format!("({ret}) strtod(ok, NULL)"),
-        Some(Scalar::Int { signed: false, .. }) => format!("({ret}) strtoull(ok, NULL, 10)"),
-        _ => format!("({ret}) strtoll(ok, NULL, 10)"),
+        Some(Scalar::Bool) => "strncmp(fa_reply, \"true\", 4) == 0".to_string(),
+        Some(Scalar::Float(_)) => format!("({ret}) strtod(fa_reply, NULL)"),
+        Some(Scalar::Int { signed: false, .. }) => format!("({ret}) strtoull(fa_reply, NULL, 10)"),
+        _ => format!("({ret}) strtoll(fa_reply, NULL, 10)"),
     };
     let body = format!(
         r#"/* Calls the verified Rust port of {id}. FAST_ANYTHING_DISABLE=1 runs the C version instead. */
@@ -1226,30 +1226,30 @@ static int fa_str_S(fa_buf_S *b, const char *s) {{
 }}
 /* Sets *fa_ok to 0 (and the C version runs) if the port can't answer. */
 {ret} fa_fast_S(int *fa_ok, {params}) {{
-    fa_buf_S b = {{0}};
-    size_t n = 0;
-    unsigned char *out;
-    char *text;
-    const char *ok;
-    {ret} r = 0;
+    fa_buf_S fa_b = {{0}};
+    size_t fa_n = 0;
+    unsigned char *fa_out;
+    char *fa_text;
+    const char *fa_reply;
+    {ret} fa_r = 0;
     *fa_ok = 0;
-    fa_put_S(&b, "[");
-{puts}    fa_put_S(&b, "]");
-    out = fa_call_S((const unsigned char *) b.p, b.len, &n);
-    text = (char *) malloc(n + 1);
-    memcpy(text, out, n);
-    text[n] = 0;
-    fa_free_S(out, n);
-    ok = strstr(text, "\"ok\":");
-    if (ok) {{
-        ok += 5;
-        r = {parse};
+    fa_put_S(&fa_b, "[");
+{puts}    fa_put_S(&fa_b, "]");
+    fa_out = fa_call_S((const unsigned char *) fa_b.p, fa_b.len, &fa_n);
+    fa_text = (char *) malloc(fa_n + 1);
+    memcpy(fa_text, fa_out, fa_n);
+    fa_text[fa_n] = 0;
+    fa_free_S(fa_out, fa_n);
+    fa_reply = strstr(fa_text, "\"ok\":");
+    if (fa_reply) {{
+        fa_reply += 5;
+        fa_r = {parse};
         *fa_ok = 1;
     }}
-    free(text);
-fallback:
-    free(b.p);
-    return r;
+    free(fa_text);
+fa_fallback:
+    free(fa_b.p);
+    return fa_r;
 }}"#,
         id = hs.id,
         loader = LOADER,
@@ -1300,19 +1300,19 @@ inline Lib &lib() {{ static Lib l; return l; }}
 }} // namespace fa_bridge_S
 {open}bool fa_on_S() {{ return fa_bridge_S::lib().on; }}
 bool fa_fast_S({ret} &fa_out, {params}) {{
-    std::string in = "[";
-    if (!fa_bridge_S::enc_all(in, {args})) return false;
-    in += "]";
-    size_t n = 0;
-    unsigned char *out = fa_bridge_S::lib().call((const unsigned char *) in.data(), in.size(), &n);
-    std::string text((const char *) out, n);
-    fa_bridge_S::lib().free(out, n);
-    const char *p = text.c_str();
-    fa_bridge_S::V reply = fa_bridge_S::parse(p);
-    if (const fa_bridge_S::V *err = reply.get("error")) throw std::runtime_error("fast-anything: " + err->s);
-    const fa_bridge_S::V *ok = reply.get("ok");
-    if (!ok) return false;
-    fa_bridge_S::from(*ok, fa_out);
+    std::string fa_in = "[";
+    if (!fa_bridge_S::enc_all(fa_in, {args})) return false;
+    fa_in += "]";
+    size_t fa_n = 0;
+    unsigned char *fa_raw = fa_bridge_S::lib().call((const unsigned char *) fa_in.data(), fa_in.size(), &fa_n);
+    std::string fa_text((const char *) fa_raw, fa_n);
+    fa_bridge_S::lib().free(fa_raw, fa_n);
+    const char *fa_p = fa_text.c_str();
+    fa_bridge_S::V fa_reply = fa_bridge_S::parse(fa_p);
+    if (const fa_bridge_S::V *fa_err = fa_reply.get("error")) throw std::runtime_error("fast-anything: " + fa_err->s);
+    const fa_bridge_S::V *fa_value = fa_reply.get("ok");
+    if (!fa_value) return false;
+    fa_bridge_S::from(*fa_value, fa_out);
     return true;
 }}
 {close}"#,
@@ -1386,6 +1386,42 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridges_compile_whatever_the_parameters_are_called() {
+        // every name the bridges use for their own variables, as a parameter
+        let c = "long pick(const int *b, size_t n, const char *text, double out, int ok, long r, int fallback) {\n    return 0;\n}\n";
+        let cpp = "long pick(const std::vector<int> &in, int n, const std::string &text, double p, int reply, int err, int ok, long out) {\n    return 0;\n}\n";
+        for (source, compilers, ext) in [(c, ["cc", "gcc", "clang"], "c"), (cpp, ["c++", "g++", "clang++"], "cpp")] {
+            let Some(cc) = compilers.into_iter().find(|c| Command::new(c).arg("--version").output().is_ok()) else {
+                eprintln!("no {ext} compiler on PATH, skipping");
+                continue;
+            };
+            let f = parse(source).remove(0);
+            let hs = Hotspot {
+                id: "lib.pick".into(),
+                name: f.name.clone(),
+                params: f.params.clone(),
+                returns: Some(f.ret.clone()),
+                ..Hotspot::default()
+            };
+            let bridge = if ext == "c" {
+                c_bridge(&hs, "t", "\"lib.so\"").unwrap()
+            } else {
+                cpp_bridge(&hs, "t", "\"lib.so\"", &[])
+            };
+            let dir = std::env::temp_dir().join(format!("fa-bridge-names-{ext}-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("bridge.{ext}")), bridge).unwrap();
+            let mut cmd = Command::new(cc);
+            if ext == "cpp" {
+                cmd.arg("-std=c++17");
+            }
+            let out = cmd.args(["-c", &format!("bridge.{ext}"), "-o", "bridge.o"]).current_dir(&dir).output().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(out.status.success(), "{ext}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
 
     #[test]
     fn finds_c_and_cpp_functions() {
