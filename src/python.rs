@@ -1010,6 +1010,18 @@ CASES = [
     ("rebind from own value", "def f():\n    import subprocess as sp\n    sp = sp.run(['true'])\n    return sp\n", "f", ["does I/O: subprocess.run"]),
     ("with target from own call", "def f():\n    from pathlib import Path\n    with Path('x').open() as Path:\n        pass\n", "f", ["does I/O: pathlib.Path"]),
     ("class in class", "import subprocess as sp\ndef f():\n    class C:\n        sp = 1\n        class D:\n            y = sp.run(['true'])\n    return C\n", "f", ["does I/O: subprocess.run"]),
+    ("direct os.path.join pure", "import os\ndef f(a, b):\n    return os.path.join(a, b)\n", "f", []),
+    ("direct timedelta pure", "import datetime\ndef f(n):\n    return datetime.timedelta(seconds=n)\n", "f", []),
+    ("direct urllib.parse.quote pure", "import urllib.parse\ndef f(s):\n    return urllib.parse.quote(s)\n", "f", []),
+    ("direct StringIO pure", "import io\ndef f(s):\n    return io.StringIO(s).getvalue()\n", "f", []),
+    ("direct PurePosixPath pure", "import pathlib\ndef f(a, b):\n    return str(pathlib.PurePosixPath(a, b))\n", "f", []),
+    ("direct uuid5 pure", "import uuid\ndef f(s):\n    return str(uuid.uuid5(uuid.NAMESPACE_DNS, s))\n", "f", []),
+    ("direct os.path.exists io", "import os\ndef f(p):\n    return os.path.exists(p)\n", "f", ["does I/O: os.path.exists"]),
+    ("direct os.listdir io", "import os\ndef f(p):\n    return os.listdir(p)\n", "f", ["does I/O: os.listdir"]),
+    ("direct datetime.now nondet", "import datetime\ndef f():\n    return datetime.datetime.now()\n", "f", ["not deterministic: datetime.datetime.now"]),
+    ("direct uuid4 nondet", "import uuid\ndef f():\n    return uuid.uuid4()\n", "f", ["not deterministic: uuid.uuid4"]),
+    ("direct urlopen io", "import urllib.request\ndef f(u):\n    return urllib.request.urlopen(u)\n", "f", ["does I/O: urllib.request.urlopen"]),
+    ("aliased time as datetime nondet", "import time as datetime\ndef f():\n    return datetime.time()\n", "f", ["not deterministic: time.time"]),
 ]
 fails = 0
 for i, (label, src, func, want) in enumerate(CASES):
@@ -1052,6 +1064,52 @@ sys.exit(1 if fails else 0)
             .unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn direct_pure_stdlib_call_is_portable_in_scan() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-pure-direct-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("work.py"),
+            "import os\n\n\
+             def join_all(items: list[tuple[str, str]]) -> int:\n\
+             \x20   total = 0\n\
+             \x20   for a, b in items:\n\
+             \x20       total += len(os.path.join(a, b))\n\
+             \x20   return total\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app.py"),
+            "import work\n\n\
+             if __name__ == '__main__':\n\
+             \x20   pairs = [('dir', f'file_{i}.txt') for i in range(200)]\n\
+             \x20   total = 0\n\
+             \x20   for _ in range(300):\n\
+             \x20       total += work.join_all(pairs)\n\
+             \x20   print(total)\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&dir, vec![python.into(), "app.py".into()], None);
+        let _ = fs::remove_dir_all(&dir);
+        let scanned = scanned.unwrap();
+        let h = scanned
+            .hotspots
+            .iter()
+            .find(|h| h.name == "join_all")
+            .unwrap_or_else(|| panic!("missing hotspot join_all; got {:?}", scanned.hotspots));
+        assert!(h.portable() && h.blockers.is_empty(), "join_all should be portable, got {:?}", h.blockers);
     }
 
     #[test]

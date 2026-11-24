@@ -31,7 +31,7 @@ IO_MODULES = {"os", "sys", "subprocess", "socket", "requests", "urllib", "http",
               "pathlib", "logging", "sqlite3", "tempfile", "glob", "asyncio", "threading", "multiprocessing", "io"}
 NONDET_MODULES = {"random", "time", "datetime", "uuid", "secrets"}
 ARRAY_LIBS = {"np", "numpy", "pd", "pandas", "torch", "scipy", "numba", "polars", "pl"}
-# Pure callables from the modules above: imported by name, they don't block a function.
+# Pure callables from the modules above: they don't block a function, whether called directly or through an import.
 PURE_CALLS = {
     "datetime.date", "datetime.datetime", "datetime.time", "datetime.timedelta", "datetime.timezone",
     "datetime.date.fromisoformat", "datetime.date.fromordinal", "datetime.date.fromisocalendar",
@@ -465,10 +465,15 @@ def resolved_calls(function, module_level):
     return found
 
 
+def is_pure_call(name):
+    """Whether a dotted call name is a known pure stdlib callable/module."""
+    return name in PURE_CALLS or any(name.startswith(m + ".") for m in PURE_MODULES)
+
+
 def resolved_effect(full):
     """("io" | "nondet", name) for a call resolved through an import, or None."""
     name = ".".join(full)
-    if name in PURE_CALLS or any(name.startswith(m + ".") for m in PURE_MODULES):
+    if is_pure_call(name):
         return None
     if len(full) < 2:
         return None  # a module isn't callable: the name was rebound to something else
@@ -600,15 +605,23 @@ def describe(path, line, name, entry, base):
                 elif head in top and head != node.name:
                     helpers.add(head)
             elif head in IO_MODULES:
-                io.add(".".join(target))
+                call_name = ".".join(target)
+                if not is_pure_call(call_name):
+                    io.add(call_name)
             elif head in NONDET_MODULES:
-                nondet.add(".".join(target))
+                call_name = ".".join(target)
+                if not is_pure_call(call_name):
+                    nondet.add(call_name)
             elif head in ARRAY_LIBS:
                 arrays.add(head)
     # the same calls through an import: `sp.run` is subprocess.run, `system` is os.system
     for target, origins in resolved_calls(node, module_level_names):
         head = target[0]
-        if (head in IO_NAMES if len(target) == 1 else head in IO_MODULES or head in NONDET_MODULES):
+        if (
+            head in IO_NAMES
+            if len(target) == 1
+            else (head in IO_MODULES or head in NONDET_MODULES) and not is_pure_call(".".join(target))
+        ):
             continue  # already caught by name
         for origin in origins:
             effect = origin and resolved_effect(list(origin) + target[1:])
