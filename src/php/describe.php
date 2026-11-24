@@ -41,14 +41,30 @@ function describe_file(string $path): array {
     $out = [];
     $classes = [];   // stack of [name, depth]
     $depth = 0;
+    $top = 0;        // the depth of top-level code: 1 inside a braced  namespace X { ... }
+    $nsOpen = -1;    // the token that opens that namespace block
     $funcs = [];
     $statics = [];
     $found = [];
     for ($i = 0; $i < $n; $i++) {
         $t = $tokens[$i];
-        if ($t === '{' || in_array(id($t), [T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES], true)) { $depth++; continue; }
-        if ($t === '}') { $depth--; if ($classes && end($classes)[1] === $depth) array_pop($classes); continue; }
+        if ($t === '{' || in_array(id($t), [T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES], true)) {
+            $depth++;
+            if ($i === $nsOpen) $top = $depth;
+            continue;
+        }
+        if ($t === '}') {
+            $depth--;
+            if ($depth < $top) $top = 0;
+            if ($classes && end($classes)[1] === $depth) array_pop($classes);
+            continue;
+        }
         $k = id($t);
+        if ($k === T_NAMESPACE) {
+            for ($m = $i + 1; $m < $n && $tokens[$m] !== ';' && $tokens[$m] !== '{'; $m++);
+            if ($m < $n && $tokens[$m] === '{') $nsOpen = $m;
+            continue;
+        }
         if (in_array($k, [T_CLASS, T_TRAIT, T_INTERFACE, T_ENUM], true)) {
             $p = $prev($i);
             if ($p >= 0 && (id($tokens[$p]) === T_DOUBLE_COLON || id($tokens[$p]) === T_NEW)) continue;
@@ -64,7 +80,7 @@ function describe_file(string $path): array {
         $name = $tokens[$j][1];
         $class = null;
         if ($classes && $depth === end($classes)[1] + 1) $class = end($classes)[0];
-        elseif ($depth !== 0) continue; // declared inside a function body
+        elseif ($depth !== $top) continue; // declared inside a function body
         // modifiers and the first token of the declaration
         $start = $i;
         $static = false;
