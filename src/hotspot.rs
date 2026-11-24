@@ -167,6 +167,33 @@ fn pass_on_helper_blockers(list: &mut [Hotspot]) {
     }
 }
 
+/// Functions that call each other (a recursive-descent parser's expr, term and factor) take about the
+/// same share and each calls the next, so each would be covered by another and none would be left to
+/// port. In every such ring the one with the biggest share, the first listed on a tie, stays uncovered:
+/// it's the way in, and the others are still ported inside it. `covers[i]` is the function covering `i`.
+fn uncover_one_per_ring(covers: &mut [Option<usize>], list: &[Hotspot]) {
+    let mut done = vec![false; covers.len()];
+    for start in 0..covers.len() {
+        let mut path = Vec::new();
+        let mut at = Some(start);
+        while let Some(i) = at.filter(|&i| !done[i] && !path.contains(&i)) {
+            path.push(i);
+            at = covers[i];
+        }
+        // the walk stopped on its own path: from there on it's a ring
+        if let Some(from) = at.and_then(|i| path.iter().position(|&p| p == i)) {
+            let keep =
+                path[from..].iter().copied().min_by(|&a, &b| list[b].share.total_cmp(&list[a].share).then(a.cmp(&b)));
+            if let Some(keep) = keep {
+                covers[keep] = None;
+            }
+        }
+        for i in path {
+            done[i] = true;
+        }
+    }
+}
+
 /// Give each function an id and a score (time share x portability), best first.
 pub fn rank(mut list: Vec<Hotspot>, wall: f64) -> Vec<Hotspot> {
     pass_on_helper_blockers(&mut list);
@@ -180,27 +207,28 @@ pub fn rank(mut list: Vec<Hotspot>, wall: f64) -> Vec<Hotspot> {
         h.score = h.share * h.portability;
     }
     // Prefer the outermost portable function: one call into Rust instead of one per inner call.
-    let covers: Vec<Option<String>> = (0..list.len())
+    let mut covers: Vec<Option<usize>> = (0..list.len())
         .map(|i| {
             let h = &list[i];
             if !h.portable() {
                 return None;
             }
-            list.iter()
-                .filter(|g| {
+            (0..list.len())
+                .filter(|&j| {
+                    let g = &list[j];
                     g.portable()
                         && g.id != h.id
                         && g.share >= 0.9 * h.share
                         && g.calls.iter().any(|c| helper_indices(&list, g, c).contains(&i))
                 })
-                .max_by(|a, b| a.share.total_cmp(&b.share))
-                .map(|g| g.id.clone())
+                .max_by(|&a, &b| list[a].share.total_cmp(&list[b].share))
         })
         .collect();
-    for (h, cover) in list.iter_mut().zip(covers) {
-        if cover.is_some() {
-            h.covered_by = cover;
-            h.score = 0.0;
+    uncover_one_per_ring(&mut covers, &list);
+    for (i, cover) in covers.into_iter().enumerate() {
+        if let Some(j) = cover {
+            list[i].covered_by = Some(list[j].id.clone());
+            list[i].score = 0.0;
         }
     }
     list.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.share.total_cmp(&a.share)));
@@ -357,6 +385,59 @@ mod tests {
             10.0,
         );
         assert!(ranked.iter().all(|h| h.portable()));
+    }
+
+    #[test]
+    fn functions_that_call_each_other_leave_one_to_port() {
+        // a recursive-descent parser: each takes about the whole run and calls the next
+        let ring = |expr: f64, term: f64, factor: f64| {
+            rank(
+                vec![
+                    calling(hs("parse_factor", Some("calc"), factor, 1.0, false), &["parse_expr"]),
+                    calling(hs("parse_expr", Some("calc"), expr, 1.0, false), &["parse_term"]),
+                    calling(hs("parse_term", Some("calc"), term, 1.0, false), &["parse_factor"]),
+                ],
+                10.0,
+            )
+        };
+        let ranked = ring(9.82, 9.81, 9.80);
+        assert_eq!(ranked[0].id, "calc.parse_expr", "the way in is the one to port");
+        assert!(ranked[0].worth_it() && ranked[0].covered_by.is_none());
+        assert_eq!(by_id(&ranked, "calc.parse_term").covered_by.as_deref(), Some("calc.parse_expr"));
+        assert_eq!(by_id(&ranked, "calc.parse_factor").covered_by.as_deref(), Some("calc.parse_term"));
+        assert_eq!(ranked.iter().filter(|h| h.worth_it()).count(), 1);
+
+        // a sampling profiler can give them all the same share: still exactly one, the first listed
+        let ranked = ring(9.8, 9.8, 9.8);
+        assert_eq!(ranked[0].id, "calc.parse_factor");
+        assert_eq!(ranked.iter().filter(|h| h.worth_it()).count(), 1);
+
+        // two that call each other
+        let ranked = rank(
+            vec![
+                calling(hs("is_odd", Some("m"), 9.0, 1.0, false), &["is_even"]),
+                calling(hs("is_even", Some("m"), 10.0, 1.0, false), &["is_odd"]),
+            ],
+            10.0,
+        );
+        assert!(by_id(&ranked, "m.is_even").worth_it());
+        assert_eq!(by_id(&ranked, "m.is_odd").covered_by.as_deref(), Some("m.is_even"));
+    }
+
+    #[test]
+    fn a_ring_called_from_a_portable_function_is_ported_inside_it() {
+        let ranked = rank(
+            vec![
+                calling(hs("parse_expr", Some("calc"), 9.8, 1.0, false), &["parse_term"]),
+                calling(hs("parse_term", Some("calc"), 9.7, 1.0, false), &["parse_expr"]),
+                calling(hs("evaluate", Some("calc"), 9.9, 1.0, false), &["parse_expr"]),
+            ],
+            10.0,
+        );
+        assert_eq!(ranked[0].id, "calc.evaluate");
+        assert_eq!(by_id(&ranked, "calc.parse_expr").covered_by.as_deref(), Some("calc.evaluate"));
+        assert_eq!(by_id(&ranked, "calc.parse_term").covered_by.as_deref(), Some("calc.parse_expr"));
+        assert_eq!(ranked.iter().filter(|h| h.worth_it()).count(), 1);
     }
 
     #[test]
