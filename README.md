@@ -98,7 +98,7 @@ Or wire it up by hand:
 
 | language | binding | status |
 |---|---|---|
-| Python 3.10+ | PyO3 | ✅ |
+| Python 3.10+ | PyO3; servers and GUIs: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
 | JavaScript / TypeScript (Node 22+, Bun, Deno 2+: `bun app.ts`, `deno run -A app.ts`) | napi-rs | ✅ |
 | Ruby 3.3+ | C ABI + JSON, through Ruby's built-in Fiddle | ✅ |
 | Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API | ✅ |
