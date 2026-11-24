@@ -1075,7 +1075,9 @@ sys.exit(1 if fails else 0)
             eprintln!("no python on PATH, skipping");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("fa-pure-direct-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-pure-direct-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
