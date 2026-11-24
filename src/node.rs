@@ -990,11 +990,15 @@ for (const [line0, name] of [[0, "f1"], [1, "f2"], [2, "f3"], [3, "f4"], [4, "f5
   assert.deepEqual(info.blockers, [], `${name} had unexpected blockers: ${info.blockers}`);
 }
 
-// Adversarial input with many slashes stays linear and preserves length
-const worst = "return " + "/ ".repeat(20000) + "\nconst ok = 1;";
-const res = codeOnly(worst);
-assert.equal(res.length, worst.length);
-assert.ok(res.endsWith("\nconst ok = 1;"));
+// Adversarial inputs with unterminated slashes (plain and unclosed character class) stay linear and preserve later code
+for (const worst of [
+  "x = /a\n".repeat(5000) + "const ok = 1;",
+  "x = /[".repeat(10000) + "\nconst ok = 1;",
+]) {
+  const res = codeOnly(worst);
+  assert.equal(res.length, worst.length);
+  assert.ok(res.endsWith("\nconst ok = 1;"));
+}
 "#,
         )
         .unwrap();

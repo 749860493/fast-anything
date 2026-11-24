@@ -87,7 +87,7 @@ function codeOnly(src) {
         afterDot = false;
       } else {
         // Unterminated on this line: fall back to treating `/` as division and don't rescan the same tail.
-        if (!inClass) noRegexBefore = j;
+        noRegexBefore = j;
         i++;
         regexAllowed = true;
         afterDot = false;
