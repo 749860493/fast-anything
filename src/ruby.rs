@@ -470,7 +470,7 @@ mod tests {
             line: 1,
             sources: vec![],
         };
-        fs::write(dir.join("shim.rb"), shim(&port, "../.fast/lib/libfa_app_rb_mean.so")).unwrap();
+        fs::write(dir.join("shim.rb"), shim(&port, &[], "../.fast/lib/libfa_app_rb_mean.so")).unwrap();
         let check = r#"
             require_relative "recorder"
             nan, inf = Float::NAN, Float::INFINITY
