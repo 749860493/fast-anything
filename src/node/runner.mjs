@@ -26,13 +26,95 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ------------------------------------------------------------------ source scanning
 
-/** The source with string contents and comments blanked out (same length, same lines). */
-function codeOnly(src) {
+const REGEX_KEYWORDS = new Set([
+  "return",
+  "case",
+  "throw",
+  "in",
+  "typeof",
+  "void",
+  "delete",
+  "new",
+  "yield",
+  "await",
+  "else",
+  "do",
+]);
+
+const EXPR_BRACE_KEYWORDS = new Set([
+  "return",
+  "throw",
+  "yield",
+  "await",
+  "typeof",
+  "void",
+  "delete",
+  "in",
+  "new",
+  "default",
+]);
+
+const ID_START = /[\p{ID_Start}$_]/u;
+const ID_CONT = /[\p{ID_Continue}$_\u200c\u200d]/u;
+
+function identStartStep(src, i) {
+  const code = src.charCodeAt(i);
+  if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95 || code === 36) return 1;
+  if (code < 128) return 0;
+  const cp = src.codePointAt(i);
+  return ID_START.test(String.fromCodePoint(cp)) ? (cp > 0xffff ? 2 : 1) : 0;
+}
+
+function identContStep(src, i) {
+  const code = src.charCodeAt(i);
+  if (
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57) ||
+    code === 95 ||
+    code === 36
+  )
+    return 1;
+  if (code < 128) return 0;
+  const cp = src.codePointAt(i);
+  return ID_CONT.test(String.fromCodePoint(cp)) ? (cp > 0xffff ? 2 : 1) : 0;
+}
+
+function isJsxCloseTag(src, slashIdx) {
+  let k = slashIdx + 1;
+  while (k < src.length && (src[k] === " " || src[k] === "\t")) k++;
+  if (src[k] === ">") return true;
+  const first = k < src.length ? identStartStep(src, k) : 0;
+  if (!first) return false;
+  k += first;
+  while (k < src.length) {
+    const ch = src[k];
+    if (ch === "." || ch === ":" || ch === "-") {
+      k++;
+      continue;
+    }
+    const step = identContStep(src, k);
+    if (!step) break;
+    k += step;
+  }
+  while (k < src.length && (src[k] === " " || src[k] === "\t")) k++;
+  return src[k] === ">";
+}
+
+/** The source with string/regex contents and comments blanked out (same length, same lines). */
+function codeOnly(src, { jsx = false } = {}) {
   const out = src.split("");
   const blank = (a, b) => {
     for (let k = a; k < b && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
   };
   let i = 0;
+  let regexAllowed = true;
+  let blockBraceNext = true;
+  let afterDot = false;
+  let afterLt = false;
+  let sawNewline = true;
+  let noRegexBefore = -1;
+  const braceStack = [];
   while (i < src.length) {
     const c = src[i];
     if (c === "/" && src[i + 1] === "/") {
@@ -41,14 +123,149 @@ function codeOnly(src) {
       i = end < 0 ? src.length : end;
     } else if (c === "/" && src[i + 1] === "*") {
       const end = src.indexOf("*/", i + 2);
-      blank(i, end < 0 ? src.length : end + 2);
-      i = end < 0 ? src.length : end + 2;
+      const stop = end < 0 ? src.length : end + 2;
+      const nl = src.indexOf("\n", i + 2);
+      const cr = src.indexOf("\r", i + 2);
+      if ((nl >= 0 && nl < stop) || (cr >= 0 && cr < stop)) sawNewline = true;
+      blank(i, stop);
+      i = stop;
     } else if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
       while (j < src.length && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
       blank(i + 1, j);
       i = j + 1;
-    } else i++;
+      regexAllowed = false;
+      blockBraceNext = false;
+      afterDot = false;
+      afterLt = false;
+      sawNewline = false;
+    } else if (
+      c === "/" &&
+      regexAllowed &&
+      i >= noRegexBefore &&
+      !(jsx && (src[i + 1] === ">" || (afterLt && isJsxCloseTag(src, i))))
+    ) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < src.length) {
+        const ch = src[j];
+        if (ch === "\n" || ch === "\r") break;
+        if (ch === "\\") {
+          if (j + 1 >= src.length || src[j + 1] === "\n" || src[j + 1] === "\r") break;
+          j += 2;
+          continue;
+        }
+        if (ch === "[") inClass = true;
+        else if (ch === "]") inClass = false;
+        else if (ch === "/" && !inClass) {
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        blank(i + 1, j);
+        j++;
+        while (j < src.length && /[A-Za-z]/.test(src[j])) j++;
+        i = j;
+        regexAllowed = false;
+        blockBraceNext = false;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+      } else {
+        // Unterminated on this line: fall back to treating `/` as division and don't rescan the same tail.
+        noRegexBefore = j;
+        i++;
+        regexAllowed = true;
+        blockBraceNext = false;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+      }
+    } else if (c === " " || c === "\t" || c === "\r" || c === "\n") {
+      if (c === "\n" || c === "\r") sawNewline = true;
+      i++;
+    } else {
+      const startStep = identStartStep(src, i);
+      if (startStep) {
+        let j = i + startStep;
+        while (j < src.length) {
+          const step = identContStep(src, j);
+          if (!step) break;
+          j += step;
+        }
+        const word = src.slice(i, j);
+        regexAllowed = !afterDot && REGEX_KEYWORDS.has(word);
+        blockBraceNext = afterDot || !EXPR_BRACE_KEYWORDS.has(word);
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i = j;
+      } else if (c >= "0" && c <= "9") {
+        let j = i + 1;
+        while (j < src.length && /[\w.]/.test(src[j])) j++;
+        regexAllowed = false;
+        blockBraceNext = false;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i = j;
+      } else if ((c === "+" && src[i + 1] === "+") || (c === "-" && src[i + 1] === "-")) {
+        regexAllowed = false;
+        blockBraceNext = false;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i += 2;
+      } else if (c === "=" && src[i + 1] === ">") {
+        regexAllowed = true;
+        blockBraceNext = true;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i += 2;
+      } else if (c === "{") {
+        braceStack.push(blockBraceNext);
+        regexAllowed = true;
+        blockBraceNext = true;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i++;
+      } else if (c === "}") {
+        const isBlock = braceStack.length > 0 ? braceStack.pop() : true;
+        regexAllowed = isBlock;
+        blockBraceNext = isBlock;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i++;
+      } else if (c === "!") {
+        // TypeScript postfix non-null assertion (`expr!`) keeps `/` as division; prefix `!` and `!=` allow regex.
+        regexAllowed = src[i + 1] === "=" || regexAllowed || sawNewline;
+        blockBraceNext = false;
+        afterDot = false;
+        afterLt = false;
+        sawNewline = false;
+        i++;
+      } else if (c === ".") {
+        regexAllowed = false;
+        blockBraceNext = false;
+        afterDot = true;
+        afterLt = false;
+        sawNewline = false;
+        i++;
+      } else {
+        regexAllowed = c !== ")" && c !== "]";
+        blockBraceNext = c === ";" || c === ")";
+        afterDot = false;
+        afterLt = c === "<";
+        sawNewline = false;
+        i++;
+      }
+    }
   }
   return out.join("");
 }
@@ -459,7 +676,7 @@ function describe(file, line0, name, entry, root) {
   if (!parsed.has(file)) {
     try {
       const src = readFileSync(file, "utf8");
-      const code = codeOnly(src);
+      const code = codeOnly(src, { jsx: /\.[jt]sx$/i.test(file) });
       parsed.set(file, { src, code, top: topLevelFunctions(src), imports: importsOf(src, code) });
     } catch {
       parsed.set(file, null);
