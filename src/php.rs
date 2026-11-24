@@ -287,6 +287,7 @@ pub const FLAVOR: Flavor = Flavor {
         "PHP ints are `i64` and turn into floats on overflow; `/` gives a float unless the division is exact, `intdiv` truncates.",
         "Untyped parameters arrive as `serde_json::Value`: pick concrete types from the recorded calls.",
     ],
+    floats: None,
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {

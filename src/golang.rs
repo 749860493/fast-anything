@@ -437,6 +437,7 @@ pub const FLAVOR: Flavor = Flavor {
         "A nil slice or map arrives (and may be returned) as an empty Vec or HashMap: fast-anything treats them as equal.",
         "Map iteration order is random in Go: return results in the order the original does when it's deterministic.",
     ],
+    floats: None,
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {

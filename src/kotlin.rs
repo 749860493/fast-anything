@@ -777,6 +777,7 @@ pub const FLAVOR: Flavor = Flavor {
         "`lowercase()` / `uppercase()` don't depend on the locale; integer `/` and `%` truncate toward zero, as in Rust.",
         "Lists and arrays arrive as JSON arrays, Maps as objects with String keys, null as null (`Option<T>` for `T?`). For an extension function, the receiver is the first argument.",
     ],
+    floats: None,
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {

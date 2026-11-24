@@ -30,6 +30,8 @@ pub struct Flavor {
     pub default_json: fn(&str) -> Option<String>,
     /// Language-specific rules for TASK.md.
     pub rules: &'static [&'static str],
+    /// How NaN and infinity travel (see glue_rs), if the language's bridge and recorder carry them.
+    pub floats: Option<[&'static str; 4]>,
 }
 
 // ------------------------------------------------------------------ the crate
@@ -229,7 +231,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port, f: &F
     fs::create_dir_all(dir.join(".cargo"))?;
     fs::write(dir.join("Cargo.toml"), cargo_toml(port))?;
     fs::write(dir.join(".cargo/config.toml"), backend::CARGO_CONFIG)?;
-    fs::write(dir.join("src/lib.rs"), glue_rs(hs, port, f.default_json, None))?;
+    fs::write(dir.join("src/lib.rs"), glue_rs(hs, port, f.default_json, f.floats))?;
     let body = dir.join("src/port.rs");
     if !body.exists() {
         fs::write(&body, port_rs(hs, port, f))?;
