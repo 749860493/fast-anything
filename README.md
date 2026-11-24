@@ -84,7 +84,13 @@ fast-anything ports the outermost loop it can, not the tiny function called insi
 
 ## Agents
 
-- **Claude Code plugin**: `/plugin marketplace add EL4CTEO/fast-anything`, then `/plugin install fast-anything@fast-anything` and `/fast-anything:fast python app.py`
+**Plugin**: the repo is an agent plugin marketplace ([`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json)) that bundles the skill and the MCP server. Install the CLI first, then:
+
+- **Codex**: `codex plugin marketplace add EL4CTEO/fast-anything`, then install `fast-anything` from `/plugins`
+- **Claude Code**: `/plugin marketplace add EL4CTEO/fast-anything`, then `/plugin install fast-anything@fast-anything` and `/fast-anything:fast python app.py`
+
+Or wire it up by hand:
+
 - **MCP server** (Claude Code, Codex, Cursor…), built into the binary: `claude mcp add fast-anything -- fast-anything mcp`. 8 tools: `fast_scan`, `fast_port`, `fast_verify`, `fast_enable`, `fast_disable`, `fast_bench`, `fast_report`, `fast_status`.
 - **Skill**: [`skills/fast-anything`](skills/fast-anything/SKILL.md) teaches any agent the loop.
 
