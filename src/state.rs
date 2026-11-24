@@ -86,6 +86,7 @@ fn forms(source: &str) -> [String; 3] {
 /// The file without fast-anything's own marked blocks: an enabled Java, Go, C#, C/C++, PHP or
 /// Kotlin port puts one inside the function's body, and that isn't a change to the original.
 fn without_blocks(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = String::with_capacity(text.len());
     let mut inside = false;
     for line in text.split_inclusive('\n') {

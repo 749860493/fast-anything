@@ -112,7 +112,7 @@ const parsed = new Map();
 function describe(file, line0, name, entry, root) {
   if (!parsed.has(file)) {
     try {
-      const src = readFileSync(file, "utf8");
+      const src = readFileSync(file, "utf8").replace(/^\uFEFF/, "");
       parsed.set(file, { src, code: codeOnly(src), top: topLevelFunctions(src) });
     } catch {
       parsed.set(file, null);
