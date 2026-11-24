@@ -366,8 +366,17 @@ fn is_variadic(p: &Param) -> bool {
     p.annotation.as_deref().is_some_and(|t| t.starts_with("..."))
 }
 
+/// The function's value type, and whether it also returns an error: "(T, error)" (see describe.go).
+fn ret_parts(hs: &Hotspot) -> (String, bool) {
+    let r = hs.returns.clone().unwrap_or_default();
+    match r.strip_prefix('(').and_then(|t| t.strip_suffix(", error)")) {
+        Some(t) => (t.to_string(), true),
+        None => (r, false),
+    }
+}
+
 fn ret(hs: &Hotspot) -> String {
-    hs.returns.clone().unwrap_or_default()
+    ret_parts(hs).0
 }
 
 pub fn record(ctx: &Ctx, go: &str, args: &[String], hs: &Hotspot, out: &Path, limit: usize) -> Result<Recording> {
@@ -384,13 +393,22 @@ pub fn record(ctx: &Ctx, go: &str, args: &[String], hs: &Hotspot, out: &Path, li
             None => format!("a[{i}].({})", p.annotation.as_deref().unwrap_or("any")),
         })
         .collect();
-    let prologue = format!(
-        "if !fastAnythingRecInside {{\n\treturn fastAnythingRec([]any{{{args}}}, func(a []any) any {{ return {name}({casts}) }}).({ret})\n}}",
-        args = arg_list(hs),
-        name = hs.name,
-        casts = casts.join(", "),
-        ret = ret(hs),
-    );
+    let (value, errors) = ret_parts(hs);
+    let prologue = if errors {
+        format!(
+            "if !fastAnythingRecInside {{\n\tfaP := fastAnythingRec([]any{{{args}}}, func(a []any) any {{\n\t\tfaV, faErr := {name}({casts})\n\t\treturn fastAnythingRecPair{{faV, faErr}}\n\t}}).(fastAnythingRecPair)\n\tfaV, _ := faP.V.({value})\n\treturn faV, faP.Err\n}}",
+            args = arg_list(hs),
+            name = hs.name,
+            casts = casts.join(", "),
+        )
+    } else {
+        format!(
+            "if !fastAnythingRecInside {{\n\treturn fastAnythingRec([]any{{{args}}}, func(a []any) any {{ return {name}({casts}) }}).({value})\n}}",
+            args = arg_list(hs),
+            name = hs.name,
+            casts = casts.join(", "),
+        )
+    };
     let patched =
         native::insert_in_body(&text, "//", &format!("recording {}", hs.id), &prologue, find_body(&hs.name, hs.line))?;
     let rec = REC.replace("/*PKG*/", &pkg_name(ctx, hs)?).replace("/*ID*/", &hs.id);
@@ -427,6 +445,10 @@ pub fn rust_type(t: &str) -> Option<String> {
     if let Some(item) = t.strip_prefix("...") {
         return Some(format!("Vec<{}>", rust_type(item)?));
     }
+    // (T, error): the port returns Result<T, String>, Err for the error
+    if let Some(value) = t.strip_prefix('(').and_then(|t| t.strip_suffix(", error)")) {
+        return rust_type(value);
+    }
     Some(match t {
         "int" | "int64" => "i64".into(),
         "int32" | "rune" => "i32".into(),
@@ -460,6 +482,7 @@ pub const FLAVOR: Flavor = Flavor {
         "Go strings are UTF-8 bytes: `len(s)` and `s[i]` are bytes, `for _, r := range s` and `[]rune(s)` are characters. Do the same in Rust.",
         "A nil slice or map arrives (and may be returned) as an empty Vec or HashMap: fast-anything treats them as equal.",
         "Map iteration order is random in Go: return results in the order the original does when it's deterministic.",
+        "A function returning (T, error): return `Err(message)` where it returns a non-nil error (its message is `err.Error()`); enabled, Go gets `errors.New(message)` back, so callers comparing against sentinel errors (`err == io.EOF`, `errors.Is`) won't match.",
     ],
     floats: None,
 };
@@ -515,9 +538,14 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
             .replace("/*PARAMS*/", &params.join(", "))
             .replace("/*ARGS*/", &arg_list(hs))
             .replace("/*RET*/", &ret(hs))
+            .replace("/*ERRORS*/", if ret_parts(hs).1 { "true" } else { "false" })
             .replace("/*LIB*/", &lib)
     };
-    let prologue = format!("if faR, faOK := faFast_{s}({}); faOK {{\n\treturn faR\n}}", call_args(hs));
+    let prologue = if ret_parts(hs).1 {
+        format!("if faR, faErr, faOK := faFast_{s}({}); faOK {{\n\treturn faR, faErr\n}}", call_args(hs))
+    } else {
+        format!("if faR, _, faOK := faFast_{s}({}); faOK {{\n\treturn faR\n}}", call_args(hs))
+    };
     let patched = native::insert_in_body(&text, "//", &port.id, &prologue, find_body(&port.func, hs.line))?;
     for (path, template) in bridge_files(&file, port)?.iter().zip([BRIDGE, BRIDGE_WINDOWS, BRIDGE_UNIX, BRIDGE_NOCGO]) {
         fs::write(path, fill(template))?;
@@ -540,6 +568,100 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bridge_returns_the_ports_error() {
+        if !Command::new("go").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no go on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-go-bridge-error-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let bridge = BRIDGE
+            .replace("/*S*/", "t")
+            .replace("/*PKG*/", "main")
+            .replace("/*ID*/", "m.parse")
+            .replace("/*PARAMS*/", "s string")
+            .replace("/*ARGS*/", "s")
+            .replace("/*RET*/", "int")
+            .replace("/*ERRORS*/", "true")
+            .replace("/*LIB*/", "\"lib\"");
+        // a stand-in for the port: an error for "x", a number otherwise
+        let main = r#"package main
+
+import "fmt"
+
+func faLoad_t(path string) bool { return true }
+
+func faInvoke_t(in []byte) []byte {
+	if string(in) == `["x"]` {
+		return []byte(`{"error":"bad input"}`)
+	}
+	return []byte(`{"ok":7}`)
+}
+
+func main() {
+	n, err, ok := faFast_t("x")
+	fmt.Println(n, err, ok)
+	n, err, ok = faFast_t("7")
+	fmt.Println(n, err, ok)
+}
+"#;
+        fs::write(dir.join("go.mod"), "module t\n\ngo 1.22\n").unwrap();
+        fs::write(dir.join("bridge.go"), bridge).unwrap();
+        fs::write(dir.join("main.go"), main).unwrap();
+        let run = Command::new("go").args(["run", "."]).current_dir(&dir).env("CGO_ENABLED", "0").output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "0 bad input true\n7 <nil> true\n");
+    }
+
+    #[test]
+    fn a_value_and_an_error_are_portable_and_recorded() {
+        if !Command::new("go").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no go on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-go-value-error-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), "module demo\n\ngo 1.22\n").unwrap();
+        let lib = "package main\n\nimport \"strconv\"\n\nfunc parse(s string) (int, error) {\n\treturn strconv.Atoi(s)\n}\n\nfunc half(n int) (h int, err error) {\n\th = n / 2\n\treturn\n}\n\nfunc split(s string) (int, int) {\n\treturn len(s), 0\n}\n";
+        let main = "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tt := 0\n\tfor _, s := range []string{\"1\", \"22\", \"x\", \"333\"} {\n\t\tn, err := parse(s)\n\t\tif err == nil {\n\t\t\tt += n\n\t\t}\n\t}\n\th, _ := half(t)\n\ta, _ := split(\"ab\")\n\tfmt.Println(t, h, a)\n}\n";
+        fs::write(dir.join("lib.go"), lib).unwrap();
+        fs::write(dir.join("main.go"), main).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let funcs = describe(&ctx, "go").unwrap();
+        let find = |n: &str| funcs.iter().find(|f| f.name == n).unwrap();
+        assert_eq!(find("parse").returns.as_deref(), Some("(int, error)"));
+        assert!(find("parse").blockers.is_empty(), "{:?}", find("parse").blockers);
+        assert_eq!(find("half").returns.as_deref(), Some("(int, error)"));
+        assert!(find("half").blockers.is_empty(), "named results: {:?}", find("half").blockers);
+        assert!(find("split").blockers.iter().any(|b| b.starts_with("returns more than one value")));
+        assert_eq!(rust_type("(int, error)").as_deref(), Some("i64"));
+        let hs = Hotspot {
+            id: "main.parse".into(),
+            file: "lib.go".into(),
+            line: 5,
+            name: "parse".into(),
+            qualname: "parse".into(),
+            params: vec![Param { name: "s".into(), annotation: Some("string".into()), ..Param::default() }],
+            returns: Some("(int, error)".into()),
+            ..Hotspot::default()
+        };
+        let out = dir.join("rec.jsonl");
+        let rec = record(&ctx, "go", &["run".into(), ".".into()], &hs, &out, 50);
+        let lines = fs::read_to_string(&out).unwrap_or_default();
+        let after = fs::read_to_string(dir.join("lib.go")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(rec.unwrap().calls, 4);
+        assert!(lines.contains(r#"{"args":["22"],"result":22}"#), "{lines}");
+        assert!(lines.contains(r#"{"args":["x"],"raises":"strconv.Atoi: parsing \"x\": invalid syntax"}"#), "{lines}");
+        assert!(
+            lines.contains(r#""raises":"strconv.Atoi: parsing \"\": invalid syntax","derived":"edge"}"#),
+            "{lines}"
+        );
+        assert_eq!(after, lib);
+    }
 
     #[test]
     fn variadic_functions_are_portable() {

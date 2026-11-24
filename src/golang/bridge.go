@@ -21,15 +21,16 @@ var (
 	faOn_/*S*/   bool
 )
 
-func faFast_/*S*/(/*PARAMS*/) (/*RET*/, bool) {
+// The port's answer, the error it gives where the original returns (T, error), and whether it answered.
+func faFast_/*S*/(/*PARAMS*/) (/*RET*/, error, bool) {
 	var zero /*RET*/
 	faOnce_/*S*/.Do(func() { faOn_/*S*/ = os.Getenv("FAST_ANYTHING_DISABLE") == "" && faLoad_/*S*/(/*LIB*/) })
 	if !faOn_/*S*/ {
-		return zero, false
+		return zero, nil, false
 	}
 	in, err := faJSON_/*S*/([]any{/*ARGS*/})
 	if err != nil {
-		return zero, false // NaN, Inf or non-UTF-8 input: let Go handle it
+		return zero, nil, false // NaN, Inf or non-UTF-8 input: let Go handle it
 	}
 	var reply struct {
 		Ok    json.RawMessage `json:"ok"`
@@ -39,13 +40,16 @@ func faFast_/*S*/(/*PARAMS*/) (/*RET*/, bool) {
 		panic("fast-anything: " + err.Error())
 	}
 	if reply.Error != nil {
+		if /*ERRORS*/ {
+			return zero, errors.New(*reply.Error), true
+		}
 		panic("fast-anything: " + *reply.Error)
 	}
 	var out /*RET*/
 	if err := json.Unmarshal(reply.Ok, &out); err != nil {
 		panic("fast-anything: " + err.Error())
 	}
-	return out, true
+	return out, nil, true
 }
 
 func faJSON_/*S*/(v any) (string, error) {

@@ -39,6 +39,38 @@ func init() {
 	expvar.Publish("fast_anything_save", expvar.Func(func() any { fastAnythingRecSave(); return nil }))
 }
 
+// What a function returning (T, error) gave back.
+type fastAnythingRecPair struct {
+	V   any
+	Err error
+}
+
+// The result as JSON; for a (T, error) function that returned an error, raised is its message.
+func fastAnythingRecResult(r any) (enc string, raised *string, err error) {
+	if p, ok := r.(fastAnythingRecPair); ok {
+		if p.Err != nil {
+			msg := p.Err.Error()
+			return "", &msg, nil
+		}
+		r = p.V
+	}
+	enc, err = fastAnythingRecJSON(r)
+	return enc, nil, err
+}
+
+// A derived case: its result, or the error a (T, error) function returned (the port must fail too).
+func fastAnythingRecDerived(args string, r any, tag string) (string, bool) {
+	re, raised, err := fastAnythingRecResult(r)
+	if err != nil {
+		return "", false
+	}
+	if raised != nil {
+		q, _ := json.Marshal(*raised)
+		return `{"args":` + args + `,"raises":` + string(q) + `,"derived":` + tag + "}", true
+	}
+	return `{"args":` + args + `,"result":` + re + `,"derived":` + tag + "}", true
+}
+
 func fastAnythingRec(args []any, fn func([]any) any) any {
 	fastAnythingRecMu.Lock()
 	defer fastAnythingRecMu.Unlock()
@@ -67,8 +99,12 @@ func fastAnythingRec(args []any, fn func([]any) any) any {
 		if after, err := fastAnythingRecJSON(args); err == nil && after != enc {
 			fastAnythingRecMutates = true
 		}
-		if re, err := fastAnythingRecJSON(r); err == nil {
+		if re, raised, err := fastAnythingRecResult(r); err == nil {
 			line := `{"args":` + enc + `,"result":` + re + "}"
+			if raised != nil {
+				q, _ := json.Marshal(*raised)
+				line = `{"args":` + enc + `,"raises":` + string(q) + "}"
+			}
 			if slot < len(fastAnythingRecKept) {
 				fastAnythingRecKept[slot], fastAnythingRecArgs[slot] = line, copied
 			} else {
@@ -352,11 +388,11 @@ func fastAnythingRecSave() {
 		if !ok {
 			return 0, false
 		}
-		re, err := fastAnythingRecJSON(r)
-		if err != nil {
+		line, ok := fastAnythingRecDerived(enc, r, `"edge"`)
+		if !ok {
 			return 0, false
 		}
-		derived = append(derived, `{"args":`+enc+`,"result":`+re+`,"derived":"edge"}`)
+		derived = append(derived, line)
 		return took, true
 	}
 	grown := map[int]bool{}
@@ -430,8 +466,8 @@ outer:
 				if !ok {
 					continue
 				}
-				if re, err := fastAnythingRecJSON(r); err == nil {
-					derived = append(derived, `{"args":`+enc+`,"result":`+re+`,"derived":true}`)
+				if line, ok := fastAnythingRecDerived(enc, r, "true"); ok {
+					derived = append(derived, line)
 				}
 			}
 		}
