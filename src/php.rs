@@ -356,6 +356,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_recorder_adds_edge_cases() {
+        use serde_json::json;
+        if !Command::new("php").arg("-v").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no php on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-php-edges-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("rec.php"), REC).unwrap();
+        // width throws on an emoji: inputs it throws on aren't fair tests and must be left out
+        let check = r#"<?php
+            require __DIR__ . '/rec.php';
+            function width(string $s, array $xs): int
+            {
+                if (str_contains($s, "\u{1f44d}")) throw new InvalidArgumentException('emoji');
+                return preg_match_all('/./su', $s) + count($xs);
+            }
+            $s = str_repeat('word ', 40);
+            for ($k = 0; $k < 3; $k++) {
+                FastAnythingRec::record('width', [$s, array_fill(0, 20 + $k, 0)], 'width');
+            }
+        "#;
+        fs::write(dir.join("check.php"), check).unwrap();
+        let out = dir.join("rec.jsonl");
+        let run = Command::new("php")
+            .arg("check.php")
+            .current_dir(&dir)
+            .env("FAST_ANYTHING_RECORD_OUT", &out)
+            .env("FAST_ANYTHING_RECORD_META", dir.join("meta.json"))
+            .output()
+            .unwrap();
+        let text = fs::read_to_string(&out).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            run.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let edges: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|c| c["derived"] == "edge")
+            .collect();
+        let has_arg = |want: &Value, i: usize| edges.iter().any(|c| &c["args"][i] == want);
+        assert!(has_arg(&json!(""), 0) && has_arg(&json!([]), 1), "empty inputs: {text}");
+        // non-ASCII text, added to the short version of the recorded input (64 characters, 8 items)
+        let short: String = "word ".repeat(40).chars().take(64).collect();
+        assert!(has_arg(&json!(format!("{short}\u{65e5}\u{672c}")), 0), "{text}");
+        assert!(!text.contains('\u{1f44d}'), "an input the original throws on");
+        assert!(edges.iter().any(|c| c["args"][1].as_array().is_some_and(|a| a.len() == 8 * 16)), "bigger arrays");
+        assert!(edges.iter().any(|c| c["args"][1][0] == json!(-1)), "special numbers in arrays");
+        assert!(edges.iter().all(|c| c["result"].is_i64()), "every edge has the original's answer");
+        assert!(edges.len() <= 100);
+    }
+
+    #[test]
     fn php_bits() {
         assert!(is_php("php") && is_php("php8.3") && is_php("C:\\php\\php.exe") && !is_php("phpunit"));
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
