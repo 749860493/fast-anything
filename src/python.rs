@@ -904,6 +904,37 @@ mod tests {
     }
 
     #[test]
+    fn class_methods_that_dont_use_cls_are_portable() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fa-classmethod-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner.py"), RUNNER).unwrap();
+        fs::write(
+            dir.join("text.py"),
+            "class Text:\n    LIMIT = 3\n\n    @classmethod\n    def lev(cls, a: str, b: str = 'x') -> int:\n        return len(a) + len(b)\n\n    @classmethod\n    def capped(cls, a: str) -> int:\n        return min(len(a), cls.LIMIT)\n",
+        )
+        .unwrap();
+        let check = "import runpy, sys, os\n\
+                     d = sys.argv[1]\n\
+                     describe = runpy.run_path(os.path.join(d, 'runner.py'))['describe']\n\
+                     f = os.path.join(d, 'text.py')\n\
+                     info = describe(f, 5, 'lev', None, d)\n\
+                     assert info['owner'] == 'Text' and info['blockers'] == [], info\n\
+                     assert [(p['name'], p['default']) for p in info['params']] == [('a', None), ('b', \"'x'\")], info['params']\n\
+                     info = describe(f, 9, 'capped', None, d)\n\
+                     assert info['blockers'] == ['classmethod that uses cls (one that doesn\\'t can move)'], info\n";
+        let out = Command::new(python).args(["-I", "-c", check]).arg(&dir).output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
     fn static_methods_are_portable() {
         let Some(python) = ["python3", "python"]
             .into_iter()

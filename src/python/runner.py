@@ -556,10 +556,20 @@ def describe(path, line, name, entry, base):
     elif module == "__main__" and node.lineno > guard:
         blockers.append("defined inside the if __name__ == '__main__' block")
     owner = None
-    if kind == "method" and any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list):
+    decorators = {d.id for d in node.decorator_list if isinstance(d, ast.Name)}
+    drop_first = False  # a classmethod's cls isn't an argument callers pass
+    if kind == "method" and "staticmethod" in decorators:
         owner = qualname.rsplit(".", 1)[0]
+    elif kind == "method" and "classmethod" in decorators:
+        # one that never uses cls behaves like a staticmethod, for subclasses too
+        owner = qualname.rsplit(".", 1)[0]
+        first = (node.args.posonlyargs + node.args.args)[:1]
+        drop_first = bool(first)
+        cls = first[0].arg if first else None
+        if cls is None or any(isinstance(n, ast.Name) and n.id == cls for n in ast.walk(node)):
+            blockers.append("classmethod that uses %s (one that doesn't can move)" % (cls or "its class"))
     elif kind == "method":
-        blockers.append("method (module-level functions and @staticmethods only for now)")
+        blockers.append("method (module-level functions, @staticmethods and @classmethods only for now)")
     elif kind == "nested":
         blockers.append("nested function")
     if isinstance(node, ast.AsyncFunctionDef):
@@ -630,6 +640,8 @@ def describe(path, line, name, entry, base):
 
     positional = args.posonlyargs + args.args
     defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    if drop_first:
+        positional, defaults = positional[1:], defaults[1:]
     params = [{"name": a.arg, "annotation": ast.unparse(a.annotation) if a.annotation else None,
                "default": ast.unparse(d) if d is not None else None}
               for a, d in zip(positional, defaults)]
