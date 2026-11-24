@@ -846,4 +846,160 @@ mod tests {
         let on = backend::append_marked(original, "//", &port.id, &esm);
         assert_eq!(backend::strip_marked(&on, "//", &port.id), original);
     }
+
+    #[test]
+    fn scan_handles_regex_literals_and_division_ambiguity() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-node-regex-lexer-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("work.mjs"),
+            "export function stripQuotes(items) {\n\
+             \x20 let total = 0;\n\
+             \x20 for (const s of items) total += s.replace(/['\"]/g, \"\").length;\n\
+             \x20 return total;\n\
+             }\n\n\
+             export function classWithSlash(items) {\n\
+             \x20 let total = 0;\n\
+             \x20 for (const s of items) total += s.replace(/[/']/g, \"-\").length;\n\
+             \x20 return total;\n\
+             }\n\n\
+             export function returnRegex(items) {\n\
+             \x20 let count = 0;\n\
+             \x20 for (const s of items) if (hasQuote(s)) count++;\n\
+             \x20 return count;\n\
+             }\n\n\
+             function hasQuote(s) {\n\
+             \x20 return /'/.test(s);\n\
+             }\n\n\
+             export function chainedDivision(n) {\n\
+             \x20 let total = 0;\n\
+             \x20 const obj = { return: 100 };\n\
+             \x20 for (let i = 1; i <= n; i++) {\n\
+             \x20   const x = i / 2 // comment with 'quote' and \"double\"\n\
+             \x20     + obj.return / 2;\n\
+             \x20   total += x / 3 / 5;\n\
+             \x20 }\n\
+             \x20 return total;\n\
+             }\n\n\
+             export function templateAndComments(items) {\n\
+             \x20 let total = 0;\n\
+             \x20 /* block comment with 'quote' and /regex/ */\n\
+             \x20 for (let k = 0; k < 4; k++) {\n\
+             \x20   for (const s of items) {\n\
+             \x20     const tag = `a / b / 'c' ${s}`;\n\
+             \x20     total += tag.length;\n\
+             \x20   }\n\
+             \x20 }\n\
+             \x20 return total;\n\
+             }\n\n\
+             export function afterRegex(n) {\n\
+             \x20 let t = 0;\n\
+             \x20 for (let i = 0; i < n; i++) t += (i * i) % 97;\n\
+             \x20 return t;\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app.mjs"),
+            "import { stripQuotes, classWithSlash, returnRegex, chainedDivision, templateAndComments, afterRegex } from './work.mjs';\n\
+             const items = Array.from({ length: 2000 }, (_, i) => `a/b'c\"${i}`);\n\
+             let s = 0;\n\
+             for (let r = 0; r < 100; r++) {\n\
+             \x20 s += stripQuotes(items);\n\
+             \x20 s += classWithSlash(items);\n\
+             \x20 s += returnRegex(items);\n\
+             \x20 s += chainedDivision(80000);\n\
+             \x20 s += templateAndComments(items);\n\
+             \x20 s += afterRegex(100000);\n\
+             }\n\
+             console.log(s);\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&dir, vec!["node".into(), "app.mjs".into()], None);
+        let _ = fs::remove_dir_all(&dir);
+        let scanned = scanned.unwrap();
+        for name in
+            ["stripQuotes", "classWithSlash", "returnRegex", "chainedDivision", "templateAndComments", "afterRegex"]
+        {
+            let h = scanned.hotspots.iter().find(|h| h.name == name).unwrap_or_else(|| {
+                panic!("missing hotspot {name}; got {:?}", scanned.hotspots.iter().map(|h| &h.name).collect::<Vec<_>>())
+            });
+            assert!(h.portable(), "{name} should be portable, got blockers {:?}", h.blockers);
+        }
+    }
+
+    #[test]
+    fn code_only_handles_regex_and_division_deterministically() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-node-codeonly-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Export codeOnly from a temporary copy of runner.mjs to assert exact blanking on tricky tokens
+        // (and verify linear time on adversarial unterminated-slash lines).
+        let stripped = RUNNER.split("const [mode, jobPath]").next().unwrap();
+        fs::write(dir.join("lib.mjs"), format!("{stripped}\nexport {{ codeOnly, describe }};\n")).unwrap();
+        fs::write(
+            dir.join("check.mjs"),
+            r#"import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { codeOnly, describe } from "./lib.mjs";
+
+// Division preserved intact
+assert.equal(codeOnly("const r = a / b / c;"), "const r = a / b / c;");
+assert.equal(codeOnly("const r = (a + b) / 2 / arr[0];"), "const r = (a + b) / 2 / arr[0];");
+assert.equal(codeOnly("const r = obj.return / 2;"), "const r = obj.return / 2;");
+assert.equal(codeOnly("const r = i++ / 2;"), "const r = i++ / 2;");
+
+// Division followed by line comment containing quotes
+const divComment = codeOnly("const x = y / 2 // it's a \"comment\"\nconst z = 1;");
+assert.equal(divComment.length, "const x = y / 2 // it's a \"comment\"\nconst z = 1;".length);
+assert.ok(divComment.startsWith("const x = y / 2 "));
+assert.ok(divComment.endsWith("\nconst z = 1;"));
+
+// Regex literals with quotes, slashes in character class, escapes, and after keywords
+assert.equal(codeOnly("s.replace(/['\"]/g, \"\")"), "s.replace(/    /g, \"\")");
+assert.equal(codeOnly("s.replace(/[/]/g, \"-\")"), "s.replace(/   /g, \" \")");
+assert.equal(codeOnly("return /'/.test(s);"), "return / /.test(s);");
+assert.equal(codeOnly("return /https?:\\/\\//.test(s);"), "return /           /.test(s);");
+assert.equal(codeOnly("const t = `a / b / 'c'`;\nconst ok = 1;"), "const t = `           `;\nconst ok = 1;");
+
+// Escaped quotes inside regex and comments don't leak into later functions
+const modFile = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "sample.mjs");
+const sample = [
+  "export function f1(s) { return s.replace(/['\"]/g, ''); }",
+  "export function f2(s) { return s.replace(/[/]/g, '-'); }",
+  "export function f3(s) { return /'/.test(s); }",
+  "export function f4(a, b, c) { return a / b / c; }",
+  "export function f5(y) { const x = y / 2; // don't break\n  return x; }",
+  "export function f6(s) { const t = `a / b`; return t + s; }",
+].join("\n") + "\n";
+fs.writeFileSync(modFile, sample);
+const root = path.dirname(modFile);
+for (const [line0, name] of [[0, "f1"], [1, "f2"], [2, "f3"], [3, "f4"], [4, "f5"], [6, "f6"]]) {
+  const info = describe(modFile, line0, name, null, root);
+  assert.ok(info, `describe missed ${name}`);
+  assert.deepEqual(info.blockers, [], `${name} had unexpected blockers: ${info.blockers}`);
+}
+
+// Adversarial input with many slashes stays linear and preserves length
+const worst = "return " + "/ ".repeat(20000) + "\nconst ok = 1;";
+const res = codeOnly(worst);
+assert.equal(res.length, worst.length);
+assert.ok(res.endsWith("\nconst ok = 1;"));
+"#,
+        )
+        .unwrap();
+        let out = Command::new("node").arg("check.mjs").current_dir(&dir).output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", combined(&out));
+    }
 }

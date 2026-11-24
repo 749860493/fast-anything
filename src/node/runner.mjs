@@ -15,13 +15,32 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ------------------------------------------------------------------ source scanning
 
-/** The source with string contents and comments blanked out (same length, same lines). */
+const REGEX_KEYWORDS = new Set([
+  "return",
+  "case",
+  "throw",
+  "in",
+  "of",
+  "typeof",
+  "void",
+  "delete",
+  "new",
+  "yield",
+  "await",
+  "else",
+  "do",
+]);
+
+/** The source with string/regex contents and comments blanked out (same length, same lines). */
 function codeOnly(src) {
   const out = src.split("");
   const blank = (a, b) => {
     for (let k = a; k < b && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
   };
   let i = 0;
+  let regexAllowed = true;
+  let afterDot = false;
+  let noRegexBefore = -1;
   while (i < src.length) {
     const c = src[i];
     if (c === "/" && src[i + 1] === "/") {
@@ -37,7 +56,70 @@ function codeOnly(src) {
       while (j < src.length && src[j] !== c) j += src[j] === "\\" ? 2 : 1;
       blank(i + 1, j);
       i = j + 1;
-    } else i++;
+      regexAllowed = false;
+      afterDot = false;
+    } else if (c === "/" && regexAllowed && i >= noRegexBefore) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < src.length) {
+        const ch = src[j];
+        if (ch === "\n" || ch === "\r") break;
+        if (ch === "\\") {
+          if (j + 1 >= src.length || src[j + 1] === "\n" || src[j + 1] === "\r") break;
+          j += 2;
+          continue;
+        }
+        if (ch === "[") inClass = true;
+        else if (ch === "]") inClass = false;
+        else if (ch === "/" && !inClass) {
+          closed = true;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        blank(i + 1, j);
+        j++;
+        while (j < src.length && /[A-Za-z]/.test(src[j])) j++;
+        i = j;
+        regexAllowed = false;
+        afterDot = false;
+      } else {
+        // Unterminated on this line: fall back to treating `/` as division and don't rescan the same tail.
+        if (!inClass) noRegexBefore = j;
+        i++;
+        regexAllowed = true;
+        afterDot = false;
+      }
+    } else if (c === " " || c === "\t" || c === "\r" || c === "\n") {
+      i++;
+    } else if (/[A-Za-z_$]/.test(c)) {
+      let j = i + 1;
+      while (j < src.length && /[\w$]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      regexAllowed = !afterDot && REGEX_KEYWORDS.has(word);
+      afterDot = false;
+      i = j;
+    } else if (c >= "0" && c <= "9") {
+      let j = i + 1;
+      while (j < src.length && /[\w.]/.test(src[j])) j++;
+      regexAllowed = false;
+      afterDot = false;
+      i = j;
+    } else if ((c === "+" && src[i + 1] === "+") || (c === "-" && src[i + 1] === "-")) {
+      regexAllowed = false;
+      afterDot = false;
+      i += 2;
+    } else if (c === ".") {
+      regexAllowed = false;
+      afterDot = true;
+      i++;
+    } else {
+      regexAllowed = c !== ")" && c !== "]";
+      afterDot = false;
+      i++;
+    }
   }
   return out.join("");
 }
