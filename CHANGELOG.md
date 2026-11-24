@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.7
 
 - Go: variadic functions (#111), functions returning `(T, error)` (#107), and functions next to `main()` (#103) can be ported.
 - Java and Kotlin: functions with varargs can be ported (#109, #113); Java and PHP record edge cases (#93, #95).
@@ -9,7 +9,10 @@
 - Python: pure stdlib calls no longer block a function (#82); UTF-8 BOM files (#86).
 - Ruby: NaN and infinity cross the bridge (#91).
 - `scan`: mutually recursive functions leave one to port.
+- PHP: functions in braced namespaces can be ported (#117).
+- Python: `@classmethod`s that don't use `cls` can be ported (#119); Windows `py -3.13` launcher selectors work with `bench` (#84).
 - Plugin: agents marketplace and Codex plugin.
+
 ## 0.8.6
 
 - C#: apps start through their own launcher (`App.exe`), as `dotnet run` does, so WinUI 3 / Windows App SDK apps no longer crash with `0xc000027b` (#79).
