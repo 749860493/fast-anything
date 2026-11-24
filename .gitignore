@@ -6,3 +6,4 @@ examples/*/bin/
 examples/*/obj/
 src/csharp/bin/
 src/csharp/obj/
+__pycache__/

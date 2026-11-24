@@ -23,7 +23,7 @@ fn tools() -> Value {
         tool(
             "fast_scan",
             "Run the app under a profiler and rank functions by time share and portability to Rust.",
-            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "path": path }),
+            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "C# only: stop the app after this many seconds (GUIs, servers)" }, "path": path }),
             json!(["command"])
         ),
         tool(
@@ -76,17 +76,17 @@ fn call(params: &Value) -> Result<Value> {
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let scan = pipeline::scan(&root, command)?;
+            let scan = pipeline::scan(&root, command, args["duration"].as_f64())?;
             let top: Vec<Value> = scan
                 .hotspots
                 .iter()
                 .take(10)
                 .map(|h| {
-                    json!({ "id": h.id, "share": h.share, "calls": h.ncalls, "worth_porting": h.worth_it(),
+                    json!({ "id": h.id, "share": h.share, "calls": h.ncalls, "worth_porting": h.worth_it(), "why_not": h.why_not(),
                                   "blockers": h.blockers, "warnings": h.warnings, "file": h.file, "line": h.line })
                 })
                 .collect();
-            json!({ "wall_seconds": scan.wall, "hotspots": top })
+            json!({ "wall_seconds": scan.wall, "hotspots": top, "notes": scan.notes })
         }
         "fast_port" => {
             let samples = args["samples"].as_u64().unwrap_or(500) as usize;

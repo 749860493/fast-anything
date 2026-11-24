@@ -205,7 +205,7 @@ pub fn profile(ctx: &Ctx, php: &str, args: &[String]) -> Result<Profile> {
             None => {}
         }
     }
-    Ok(Profile { wall, base: ".".into(), functions })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
 }
 
 fn name_const(hs: &Hotspot) -> &'static str {

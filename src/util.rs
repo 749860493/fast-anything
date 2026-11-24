@@ -1,8 +1,10 @@
 //! Small helpers: paths, processes, number formatting.
 
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 pub fn absolute(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
@@ -40,6 +42,61 @@ pub fn slug(id: &str) -> String {
 
 pub fn output(cmd: &mut Command, what: &str) -> Result<Output> {
     cmd.output().with_context(|| format!("couldn't start {what} ({})", cmd.get_program().to_string_lossy()))
+}
+
+/// Like [`output`], but stops the command once `limit` has passed: asks it to close first (WM_CLOSE on Windows,
+/// SIGTERM elsewhere), so it can shut down cleanly and write what it has, then ends it for good after `grace`.
+/// Also says whether it had to be stopped.
+pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace: Duration) -> Result<(Output, bool)> {
+    let Some(limit) = limit else { return Ok((output(cmd, what)?, false)) };
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("couldn't start {what} ({})", cmd.get_program().to_string_lossy()))?;
+    fn drain<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let started = Instant::now();
+    let mut asked: Option<Instant> = None;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        match asked {
+            None if started.elapsed() >= limit => {
+                asked = Some(if ask_to_close(child.id()) { Instant::now() } else { Instant::now() - grace });
+            }
+            Some(at) if at.elapsed() >= grace => {
+                let _ = child.kill();
+                break child.wait()?;
+            }
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let out = Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() };
+    Ok((out, asked.is_some()))
+}
+
+/// Ask a process to close the way a user would. False if it can't be asked (a console app on Windows).
+fn ask_to_close(pid: u32) -> bool {
+    let (program, args) = if cfg!(windows) { ("taskkill", ["/PID"]) } else { ("kill", ["-TERM"]) };
+    Command::new(program)
+        .args(args)
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 pub fn combined(out: &Output) -> String {

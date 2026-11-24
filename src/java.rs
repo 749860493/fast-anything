@@ -364,7 +364,7 @@ pub(crate) fn profile_with(
             )
         })
         .collect();
-    Ok(Profile { wall, base: ".".into(), functions })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
 }
 
 // ------------------------------------------------------------------ editing the source

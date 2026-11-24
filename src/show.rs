@@ -42,6 +42,9 @@ pub fn scan(s: &ScanOut) {
     ui::line("");
     if s.hotspots.is_empty() {
         ui::line("  No functions from your own code showed up. Is the app doing its work in a library?");
+        for n in &s.notes {
+            ui::line(format!("  {}", yellow(format!("! {n}"))));
+        }
         return;
     }
     ui::line(dim(format!("   #  {}  {:<16}{:>11}  verdict", pad("function", 30), "time", "calls")));
@@ -71,6 +74,12 @@ pub fn scan(s: &ScanOut) {
         }
     }
     ui::line("");
+    for n in &s.notes {
+        ui::line(format!("  {}", yellow(format!("! {n}"))));
+    }
+    if !s.notes.is_empty() {
+        ui::line("");
+    }
     match s.hotspots.iter().find(|h| h.worth_it()) {
         Some(h) => next(&format!("fast-anything port {}", h.id)),
         None => {

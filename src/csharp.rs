@@ -16,7 +16,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const TOOLS_PROJECT: &str = include_str!("csharp/Tools.csproj");
 const TOOLS_PROGRAM: &str = include_str!("csharp/Program.cs");
@@ -49,6 +49,11 @@ impl DotnetRun {
     fn parse(args: &[String]) -> Result<DotnetRun> {
         let usage =
             "run the app as a project:  fast-anything scan -- dotnet run -c Release  (or --project path/App.csproj)";
+        ensure!(
+            args.first().map(String::as_str) != Some("test"),
+            "dotnet test runs your code in a separate testhost process, which isn't profiled. Scan the app itself, or a \
+             small console project that calls the code under test with real input:\n  fast-anything scan -- dotnet run -c Release --project path/App.csproj"
+        );
         ensure!(args.first().map(String::as_str) == Some("run"), "{usage}");
         let mut run = DotnetRun::default();
         let mut i = 1;
@@ -130,18 +135,39 @@ fn build(ctx: &Ctx, dotnet: &str, run: &DotnetRun) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// The app's own launcher next to its assembly (App.exe, or App on Linux and macOS), as  dotnet run  starts it.
+/// It carries the app's manifest: WinUI 3 and other Windows App SDK apps crash with 0xc000027b without it.
+fn apphost(dll: &Path) -> Option<PathBuf> {
+    let host = dll.with_extension(std::env::consts::EXE_EXTENSION);
+    (host != dll && host.is_file()).then_some(host)
+}
+
+/// How to start the built app: its launcher if it has one, else  dotnet App.dll.
+fn app_argv(dotnet: &str, dll: &Path, args: &[String]) -> (String, Vec<String>) {
+    let (program, mut argv) = match apphost(dll) {
+        Some(host) => (host.to_string_lossy().into_owned(), vec![]),
+        None => (dotnet.to_string(), vec![dll.to_string_lossy().into_owned()]),
+    };
+    argv.extend(args.iter().cloned());
+    (program, argv)
+}
+
 fn app_command(dotnet: &str, dll: &Path, args: &[String]) -> Command {
-    let mut cmd = Command::new(dotnet);
-    cmd.arg(dll).args(args);
+    let (program, argv) = app_argv(dotnet, dll, args);
+    let mut cmd = Command::new(program);
+    cmd.args(argv);
+    // the launcher looks for the runtime here first, so it runs on the same .NET as  dotnet
+    let dir = Path::new(dotnet).parent().filter(|d| Path::new(dotnet).is_absolute() && d.is_dir());
+    if let (Some(dir), None) = (dir, std::env::var_os("DOTNET_ROOT")) {
+        cmd.env("DOTNET_ROOT", dir);
+    }
     cmd
 }
 
 pub fn bench_command(ctx: &Ctx, dotnet: &str) -> Result<(String, Vec<String>)> {
     let run = DotnetRun::parse(&ctx.state.command[1..])?;
     let dll = build(ctx, dotnet, &run)?;
-    let mut args = vec![dll.to_string_lossy().into_owned()];
-    args.extend(run.args);
-    Ok((dotnet.to_string(), args))
+    Ok(app_argv(dotnet, &dll, &run.args))
 }
 
 // ------------------------------------------------------------------ the helper (Roslyn + TraceEvent)
@@ -250,28 +276,89 @@ fn describe(ctx: &Ctx, dotnet: &str, dir: &Path) -> Result<Vec<Method>> {
     serde_json::from_str(&fs::read_to_string(&out)?).context("reading the method list")
 }
 
-/// "Ns.Outer+Inner.Method(int32,class System.String)" -> ("Ns.Outer+Inner", "Method")
+/// "Ns.Outer+Inner.Method(int32,class System.String)" -> ("Ns.Outer+Inner", "Method"). Code the compiler writes
+/// for a method counts as that method: its async or iterator state machine ("Ns.App+<RunAsync>d__3.MoveNext()"),
+/// its lambdas ("Ns.App+<>c.<Main>b__0_0()") and its local functions ("Ns.App.<Main>g__Step|0_0()").
 fn split_frame(frame: &str) -> Option<(&str, &str)> {
     let head = frame.split('(').next()?;
-    head.rsplit_once('.')
+    let (class, name) = head.rsplit_once('.')?;
+    // "<Method>..." -> "Method"
+    fn generated(s: &str) -> Option<&str> {
+        s.strip_prefix('<')?.split_once('>').map(|(m, _)| m)
+    }
+    // a class the compiler nested in the method's class: "Ns.App+<>c" -> "Ns.App"
+    let owner = match class.rsplit_once('+') {
+        Some((o, nested)) if nested.starts_with('<') => Some((o, nested)),
+        _ => None,
+    };
+    if let Some(m) = generated(name).filter(|m| !m.is_empty()) {
+        return Some((owner.map_or(class, |(o, _)| o), m));
+    }
+    if let Some((o, nested)) = owner
+        && let Some(m) = generated(nested).filter(|m| !m.is_empty())
+    {
+        return Some((o, m));
+    }
+    Some((class, name))
+}
+
+/// A sample of a thread that was waiting (a blocked Main, an idle thread-pool worker), not working. The wait can
+/// sit a frame or two under the leaf, in the call into the OS that does it.
+fn idle(frames: &[String]) -> bool {
+    const WAITS: [&str; 13] = [
+        "Interop+Kernel32.GetQueuedCompletionStatus",
+        "System.Threading.Monitor.Wait",
+        "System.Threading.WaitHandle.Wait",
+        "System.Threading.Thread.Sleep",
+        "System.Threading.Thread.Join",
+        "System.Threading.LowLevelLifoSemaphore.",
+        "System.Threading.LowLevelMonitor.Wait",
+        "System.Threading.ManualResetEventSlim.Wait",
+        "System.Threading.SemaphoreSlim.Wait",
+        "System.Threading.Tasks.Task.SpinThenBlockingWait",
+        "System.Threading.Tasks.Task.InternalWaitCore",
+        "System.Threading.PortableThreadPool+GateThread.",
+        "System.Threading.WaitSubsystem.",
+    ];
+    frames.iter().take(3).any(|f| WAITS.iter().any(|w| f.starts_with(w)))
+}
+
+/// "SixLabors.ImageSharp.Formats.Webp.Encoder.Encode(...)" -> "SixLabors.ImageSharp"
+fn library(frame: &str) -> String {
+    let head = frame.split('(').next().unwrap_or(frame);
+    let parts: Vec<&str> = head.split('.').collect();
+    parts[..parts.len().saturating_sub(2).clamp(1, 2)].join(".")
 }
 
 fn rel(ctx: &Ctx, p: &Path) -> String {
     util::forward_slashes(p.strip_prefix(&ctx.root).unwrap_or(p))
 }
 
-pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String]) -> Result<Profile> {
+/// `duration`: stop the app after that many seconds, for GUIs and servers that run until closed.
+pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let run = DotnetRun::parse(args)?;
     let dll = build(ctx, dotnet, &run)?;
     let trace_dir = ctx.fast.join("nettrace");
     let _ = fs::remove_dir_all(&trace_dir);
     fs::create_dir_all(&trace_dir)?;
+    let mut cmd = app_command(dotnet, &dll, &run.args);
+    if let Some(d) = duration {
+        crate::ui::line(format!("  stopping it after {d}s"));
+        // the helper's startup hook ends the app from inside, so its trace is complete
+        let hook = tools(dotnet)?;
+        let hooks = match std::env::var_os("DOTNET_STARTUP_HOOKS") {
+            Some(theirs) => std::env::join_paths([hook.into_os_string(), theirs])?,
+            None => hook.into_os_string(),
+        };
+        cmd.env("DOTNET_STARTUP_HOOKS", hooks).env("FAST_ANYTHING_STOP_AFTER_MS", ((d * 1000.0) as u64).to_string());
+    }
     let started = Instant::now();
-    let out = output(
-        app_command(dotnet, &dll, &run.args)
-            .current_dir(&ctx.root)
+    let (out, stopped) = util::output_for(
+        cmd.current_dir(&ctx.root)
             .env("DOTNET_EnableEventPipe", "1")
             .env("DOTNET_EventPipeOutputPath", trace_dir.join("app-{pid}.nettrace"))
+            // write the trace as it goes, so a run that's stopped (or crashes) still leaves its samples
+            .env("DOTNET_EventPipeOutputStreaming", "1")
             .env(
                 "DOTNET_EventPipeConfig",
                 "Microsoft-DotNETCore-SampleProfiler:0:5,Microsoft-Windows-DotNETRuntime:0x4c14fccbd:5",
@@ -279,9 +366,24 @@ pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String]) -> Result<Profile> {
             .env(DISABLE_ENV, "1")
             .stdin(Stdio::null()),
         dotnet,
+        // in case the hook can't run (a trimmed app): close it from outside
+        duration.map(|d| Duration::from_secs_f64(d + 15.0)),
+        Duration::from_secs(10),
     )?;
     let wall = started.elapsed().as_secs_f64();
-    ensure!(out.status.success(), "the app failed ({}):\n{}", out.status, tail(&combined(&out), 30));
+    ensure!(
+        stopped || out.status.success(),
+        "the app failed ({}):\n{}{}",
+        out.status,
+        tail(&combined(&out), 30),
+        if out.status.code() == Some(0xc000027bu32 as i32) {
+            "\n(0xc000027b is a stowed WinRT exception, usually XAML failing at startup: does the app start with  dotnet run  on its own?)"
+        } else if duration.is_none() {
+            "\n(a GUI or server that runs until it's closed: add  --duration 30  to stop it after 30 seconds)"
+        } else {
+            ""
+        }
+    );
     let stacks_path = ctx.fast.join("cs-stacks.json");
     helper(ctx, dotnet, "trace", &trace_dir, &stacks_path)?;
     let stacks: Vec<Stack> = serde_json::from_str(&fs::read_to_string(&stacks_path)?).context("reading the samples")?;
@@ -294,12 +396,20 @@ pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String]) -> Result<Profile> {
         by_name.entry((m.class.as_str(), m.name.as_str())).or_insert(i);
     }
     let resolve = |f: &str| split_frame(f).and_then(|k| by_name.get(&k).copied());
-    // threads that ran the app's own code; the runtime's idle threads don't count
+    // threads that ran the app's own code; the runtime's idle threads don't count, nor do samples of a thread
+    // that was waiting (a Main blocked on a task, a thread-pool worker with nothing to do)
     let app_threads: HashSet<i64> =
         stacks.iter().filter(|s| s.frames.iter().any(|f| resolve(f).is_some())).map(|s| s.thread).collect();
     let (mut total, mut own, mut incl) = (0u64, HashMap::<usize, u64>::new(), HashMap::<usize, u64>::new());
-    for s in stacks.iter().filter(|s| app_threads.contains(&s.thread)) {
+    let mut libraries = HashMap::<String, u64>::new();
+    for s in stacks.iter().filter(|s| app_threads.contains(&s.thread) && !idle(&s.frames)) {
         total += s.count;
+        // library work that only code which can't be ported leads to (Main, async methods, I/O): porting won't
+        // touch it, so the ranking alone can't say where the time went
+        let ported_from = |f: &String| resolve(f).is_some_and(|i| methods[i].blockers.is_empty());
+        if resolve(&s.frames[0]).is_none() && !s.frames.iter().any(ported_from) {
+            *libraries.entry(library(&s.frames[0])).or_default() += s.count;
+        }
         let mut seen = HashSet::new();
         for (depth, f) in s.frames.iter().enumerate() {
             let Some(i) = resolve(f) else { continue };
@@ -311,7 +421,41 @@ pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String]) -> Result<Profile> {
             }
         }
     }
-    ensure!(total > 0, "no samples landed in the app's code: does it run long enough (a second or more)?");
+    if total == 0 {
+        // say where the time went instead
+        let mut seen = HashMap::<String, u64>::new();
+        let busy: Vec<&Stack> = stacks.iter().filter(|s| !idle(&s.frames)).collect();
+        for s in &busy {
+            *seen.entry(library(&s.frames[0])).or_default() += s.count;
+        }
+        let all: u64 = busy.iter().map(|s| s.count).sum();
+        let mut seen: Vec<(String, u64)> = seen.into_iter().collect();
+        seen.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let top: Vec<String> =
+            seen.iter().take(3).map(|(l, n)| format!("{l} {:.0}%", *n as f64 / all.max(1) as f64 * 100.0)).collect();
+        bail!(
+            "no samples landed in the app's own methods (top-level statements don't count: move the work into a method){}{}",
+            if duration.is_some() {
+                "; does its work start before it's stopped?"
+            } else {
+                "; does it run long enough (a second or more)?"
+            },
+            if top.is_empty() { String::new() } else { format!("\nThe time went to: {}", top.join(", ")) }
+        );
+    }
+    let mut notes = Vec::new();
+    let mut libs: Vec<(String, u64)> = libraries.into_iter().filter(|(l, _)| !l.is_empty()).collect();
+    libs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let in_libs: u64 = libs.iter().map(|l| l.1).sum();
+    if in_libs * 2 >= total {
+        let top: Vec<String> =
+            libs.iter().take(3).map(|(l, n)| format!("{l} {:.0}%", *n as f64 / total as f64 * 100.0)).collect();
+        notes.push(format!(
+            "{:.0}% of the app's time is spent inside libraries ({}), called from code that can't move to Rust",
+            in_libs as f64 / total as f64 * 100.0,
+            top.join(", ")
+        ));
+    }
     let mut keep: Vec<usize> = incl.keys().copied().collect();
     let helpers: Vec<usize> = keep
         .iter()
@@ -354,7 +498,7 @@ pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String]) -> Result<Profile> {
             }
         })
         .collect();
-    Ok(Profile { wall, base: ".".into(), functions })
+    Ok(Profile { wall, base: ".".into(), functions, notes })
 }
 
 // ------------------------------------------------------------------ editing the source
@@ -582,6 +726,16 @@ mod tests {
         assert_eq!(plain_type("List<string?>?"), "List<string>");
         assert_eq!(plain_type("System.Int32?[]?"), "System.Int32?[]");
         assert_eq!(split_frame("Ns.Outer+Inner.Run(int32,class System.String)"), Some(("Ns.Outer+Inner", "Run")));
+        assert_eq!(split_frame("Ns.App+<RunAsync>d__3.MoveNext()"), Some(("Ns.App", "RunAsync")));
+        assert_eq!(split_frame("Ns.App+<>c.<Main>b__0_0(int32)"), Some(("Ns.App", "Main")));
+        assert_eq!(split_frame("Ns.App+<>c__DisplayClass2_0.<Load>b__1()"), Some(("Ns.App", "Load")));
+        assert_eq!(split_frame("Ns.App.<Main>g__Step|0_0()"), Some(("Ns.App", "Main")));
+        assert_eq!(split_frame("Ns.App+<>c.<<Main>$>b__0_0()").map(|f| f.0), Some("Ns.App"));
+        let frames = |v: &[&str]| v.iter().map(|f| f.to_string()).collect::<Vec<_>>();
+        assert!(idle(&frames(&["Interop+Kernel32.Foo()", "System.Threading.Monitor.Wait(class System.Object,int32)"])));
+        assert!(!idle(&frames(&["Ns.App.Run()", "Ns.App.Main()"])));
+        assert_eq!(library("SixLabors.ImageSharp.Formats.Webp.WebpEncoder.Encode(class X)"), "SixLabors.ImageSharp");
+        assert_eq!(library("System.String.Concat(string,string)"), "System");
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let r = DotnetRun::parse(&s(&["run", "-c", "Release", "--project", "app", "--", "x", "-y"])).unwrap();
         assert_eq!(r.project.as_deref(), Some("app"));
@@ -589,6 +743,7 @@ mod tests {
         assert_eq!(r.args, s(&["x", "-y"]));
         assert!(DotnetRun::parse(&s(&["run", "app.cs"])).is_err());
         assert!(DotnetRun::parse(&s(&["app.dll"])).is_err());
+        assert!(DotnetRun::parse(&s(&["test"])).unwrap_err().to_string().contains("testhost"));
         assert!(is_csharp("C:\\Program Files\\dotnet\\dotnet.exe") && !is_csharp("dotnet-trace"));
     }
 }

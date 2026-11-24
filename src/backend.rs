@@ -34,6 +34,9 @@ pub struct Profile {
     pub wall: f64,
     pub base: String,
     pub functions: Vec<Hotspot>,
+    /// What the scan should tell the user besides the ranking.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -145,7 +148,7 @@ impl Lang {
             Lang::Go => golang::profile(ctx, exe, args),
             Lang::Php => php::profile(ctx, exe, args),
             Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
-            Lang::CSharp => csharp::profile(ctx, exe, args),
+            Lang::CSharp => csharp::profile(ctx, exe, args, None),
             Lang::R => r::profile(ctx, exe, args),
             Lang::Kotlin => kotlin::profile(ctx, exe, args),
         }

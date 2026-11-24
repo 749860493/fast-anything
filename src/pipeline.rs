@@ -16,9 +16,11 @@ pub struct ScanOut {
     pub command: Vec<String>,
     pub wall: f64,
     pub hotspots: Vec<Hotspot>,
+    pub notes: Vec<String>,
 }
 
-pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
+/// `duration`: stop the app after that many seconds (a GUI or a server that doesn't exit on its own).
+pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<ScanOut> {
     ensure!(
         !command.is_empty(),
         "put the command that runs your app after --, e.g.  fast-anything scan -- python app.py"
@@ -33,9 +35,16 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
     };
     let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);
     let lang = crate::kotlin::refine(lang, &command[0], &ctx.root);
+    if let Some(d) = duration {
+        ensure!(lang == Lang::CSharp, "--duration works for C# apps only so far");
+        ensure!(d.is_finite() && d > 0.0, "--duration takes a number of seconds, e.g. --duration 30");
+    }
     let exe = lang.resolve(&command[0], &ctx.root)?;
     ui::step(format!("profiling {}", ui::bold(command.join(" "))));
-    let profile = lang.profile(&ctx, &exe, &command[1..])?;
+    let profile = match duration {
+        Some(d) => crate::csharp::profile(&ctx, &exe, &command[1..], Some(d))?,
+        None => lang.profile(&ctx, &exe, &command[1..])?,
+    };
     let hotspots = hotspot::rank(profile.functions, profile.wall);
     ctx.state.command = command.clone();
     ctx.state.lang = lang;
@@ -44,7 +53,7 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
     ctx.state.wall = profile.wall;
     ctx.state.hotspots = hotspots.clone();
     ctx.save()?;
-    Ok(ScanOut { command, wall: profile.wall, hotspots })
+    Ok(ScanOut { command, wall: profile.wall, hotspots, notes: profile.notes })
 }
 
 /// What an env runner (uv, poetry, ...) prints for a command run in the project.
@@ -504,7 +513,7 @@ pub fn go(
     runs: usize,
     samples: usize,
 ) -> Result<()> {
-    let scanned = scan(root, command)?;
+    let scanned = scan(root, command, None)?;
     show::scan(&scanned);
     let picks: Vec<String> =
         scanned.hotspots.iter().filter(|h| h.worth_it()).take(top.max(1)).map(|h| h.id.clone()).collect();

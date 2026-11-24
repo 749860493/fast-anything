@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.6
+
+- C#: apps start through their own launcher (`App.exe`), as `dotnet run` does, so WinUI 3 / Windows App SDK apps no longer crash with `0xc000027b` (#79).
+- C#: `scan --duration 30` stops a GUI or server after 30 seconds and ranks what ran (#79).
+- C#: async methods, lambdas and local functions count toward the method that holds them; waiting threads no longer dilute the shares (#79).
+- C#: when the time is in libraries reached from `Main` or async code, `scan` says which; `dotnet test` gets a clear explanation (#79).
+- `doctor` tells "ready to scan" from "ready to port": scanning doesn't need Rust (#79).
+- MCP `fast_scan` returns `why_not` for each function and the scan's notes.
+
+Thanks @JuggyBob.
+
 ## 0.8.5
 
 - `scan`: a function whose helper does I/O or is nondeterministic is no longer ranked portable (#75).

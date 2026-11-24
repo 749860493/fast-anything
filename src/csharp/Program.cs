@@ -1,6 +1,7 @@
 // C# side of fast-anything's scan. The CLI runs it as
 //     FastAnythingTools describe <file list> <out.json>   every method in the app's sources (Roslyn)
 //     FastAnythingTools trace <dir> <out.json>            sampled stacks from the .nettrace files in dir
+// and loads it into the app as a startup hook to stop it after scan --duration.
 // Not meant to be run by hand.
 using System.Text;
 using System.Text.Json;
@@ -23,6 +24,17 @@ static class Tools
         };
         File.WriteAllText(args[2], JsonSerializer.Serialize(result), new UTF8Encoding(false));
         return 0;
+    }
+}
+
+// Loaded into the app (DOTNET_STARTUP_HOOKS) when a scan has a --duration: ends the app cleanly once the time is
+// up, so the runtime finishes writing its trace. GUIs and servers don't exit on their own.
+public static class StartupHook
+{
+    public static void Initialize()
+    {
+        if (!int.TryParse(Environment.GetEnvironmentVariable("FAST_ANYTHING_STOP_AFTER_MS"), out var ms)) return;
+        new Thread(() => { Thread.Sleep(ms); Environment.Exit(0); }) { IsBackground = true, Name = "fast-anything stop" }.Start();
     }
 }
 

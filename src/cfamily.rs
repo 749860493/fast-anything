@@ -894,7 +894,7 @@ pub fn profile(ctx: &Ctx, cc: &str, args: &[String], lang: Lang) -> Result<Profi
             None => {}
         }
     }
-    Ok(Profile { wall, base: ".".into(), functions })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
 }
 
 // ------------------------------------------------------------------ recording

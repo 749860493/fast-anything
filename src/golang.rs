@@ -334,7 +334,7 @@ pub fn profile(ctx: &Ctx, go: &str, args: &[String]) -> Result<Profile> {
             functions.push(hotspot(ctx, f, flat, cum));
         }
     }
-    Ok(Profile { wall, base: ".".into(), functions })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
 }
 
 fn pkg_name(ctx: &Ctx, hs: &Hotspot) -> Result<String> {

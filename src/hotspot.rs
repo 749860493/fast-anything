@@ -60,6 +60,23 @@ impl Hotspot {
     pub fn worth_it(&self) -> bool {
         self.portable() && self.covered_by.is_none() && self.share >= WORTH_IT
     }
+
+    /// Why it isn't worth porting, if it isn't.
+    pub fn why_not(&self) -> Option<String> {
+        if let Some(b) = self.blockers.first() {
+            Some(b.clone())
+        } else if let Some(by) = &self.covered_by {
+            Some(format!("ported inside {by}"))
+        } else if self.share < WORTH_IT {
+            Some(format!(
+                "too small to matter ({:.1}% of the run, {:.0}% needed)",
+                self.share * 100.0,
+                WORTH_IT * 100.0
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 /// Blockers about what a function does, not where it lives or what its signature looks like.

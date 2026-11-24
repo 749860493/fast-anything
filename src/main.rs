@@ -67,6 +67,9 @@ enum Cmd {
     },
     /// Run your app under a profiler and rank what's worth porting
     Scan {
+        /// Stop the app after this many seconds and rank what ran (C#: GUIs and servers that don't exit)
+        #[arg(long, value_name = "SECS")]
+        duration: Option<f64>,
         /// How you run your app, after --
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -152,8 +155,8 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
         Cmd::Go { agent, top, attempts, runs, samples, command } => {
             pipeline::go(root, command, agent.as_deref(), top, attempts, runs, samples)
         }
-        Cmd::Scan { command } => {
-            show::scan(&pipeline::scan(root, command)?);
+        Cmd::Scan { command, duration } => {
+            show::scan(&pipeline::scan(root, command, duration)?);
             Ok(())
         }
         Cmd::Port { id, agent, attempts, samples } => {

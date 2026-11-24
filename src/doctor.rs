@@ -63,7 +63,12 @@ struct Check {
 pub fn run() -> Result<()> {
     let python = version("python", &["--version"]).or_else(|| version("python3", &["--version"]));
     let checks = [
-        Check { name: "cargo", found: version("cargo", &["--version"]), need: "required", hint: "https://rustup.rs" },
+        Check {
+            name: "cargo",
+            found: version("cargo", &["--version"]),
+            need: "to port (scan works without it)",
+            hint: "https://rustup.rs",
+        },
         Check { name: "python", found: python, need: "for Python apps (3.10+)", hint: "https://python.org" },
         Check {
             name: "node",
@@ -147,7 +152,7 @@ pub fn run() -> Result<()> {
                 None => ui::line(format!("  {} {:<8} {}", green("✓"), bold(c.name), dim(v))),
                 Some(why) => ui::line(format!("  {} {:<8} {} {}", red("✗"), bold(c.name), dim(v), why)),
             },
-            None if c.need == "required" => {
+            None if c.name == "cargo" => {
                 ui::line(format!("  {} {:<8} missing, {}: {}", red("✗"), bold(c.name), c.need, c.hint))
             }
             None => ui::line(format!(
@@ -158,12 +163,13 @@ pub fn run() -> Result<()> {
             )),
         }
     }
-    ensure!(usable(&checks[0]), "Rust 1.85 or newer is needed to build ports");
     ensure!(
         checks[1..12].iter().any(usable),
         "install Python, Node.js (or Bun, Deno), Ruby, Java, Go, PHP, .NET, R or a C compiler"
     );
-    ui::ok("ready");
+    ui::ok("ready to scan");
+    ensure!(usable(&checks[0]), "Rust 1.85 or newer is needed to port, verify and enable");
+    ui::ok("ready to port");
     Ok(())
 }
 
