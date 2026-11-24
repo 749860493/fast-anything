@@ -9,6 +9,9 @@
 - Python: pure stdlib calls no longer block a function (#82); UTF-8 BOM files (#86).
 - Ruby: NaN and infinity cross the bridge (#91).
 - `scan`: mutually recursive functions leave one to port.
+- `scan --duration 30` works for every language, not only C# (#115).
+- Kotlin: functions with an expression body can be ported (#123). Ruby: methods with `*rest` or keyword arguments can be ported (#125).
+- C/C++: derived and edge cases run in child processes, so one that crashes or hangs is skipped (#105, #121); Java records edge cases too.
 - PHP: functions in braced namespaces can be ported (#117).
 - Python: `@classmethod`s that don't use `cls` can be ported (#119); Windows `py -3.13` launcher selectors work with `bench` (#84).
 - Plugin: agents marketplace and Codex plugin.
