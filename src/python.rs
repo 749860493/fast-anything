@@ -131,18 +131,38 @@ pub fn resolve(program: &str, args: &[String], root: &Path) -> Result<String> {
     Ok(exe)
 }
 
-/// What bench runs for Python: the resolved interpreter with any Windows `py` launcher version
-/// selector stripped (the selector already picked the interpreter during `scan`, and `python.exe`
-/// rejects flags like `-3` or `-3.13`).
-pub fn bench_command(ctx: &Ctx, python: &str) -> Result<(String, Vec<String>)> {
-    let args = ctx.state.command.get(1..).unwrap_or_default();
-    let args = if cfg!(windows) {
+/// Drop a leading Windows `py` launcher version selector when `ctx.state.command` started with `py`.
+/// Shared by `profile`, `record` (via `helper`), and `bench` so the resolved `python.exe` and
+/// `runner.py` never receive launcher-only flags like `-3`, `-3.13`, or `-V:3.13`.
+fn strip_launcher_selector<'a>(ctx: &Ctx, args: &'a [String]) -> &'a [String] {
+    if cfg!(windows) {
         let program = ctx.state.command.first().map(String::as_str).unwrap_or_default();
         split_py_launcher_selector(program, args).1
     } else {
         args
-    };
+    }
+}
+
+/// What bench runs for Python: the resolved interpreter with any Windows `py` launcher version
+/// selector stripped.
+pub fn bench_command(ctx: &Ctx, python: &str) -> Result<(String, Vec<String>)> {
+    let args = strip_launcher_selector(ctx, ctx.state.command.get(1..).unwrap_or_default());
     Ok((python.to_string(), args.to_vec()))
+}
+
+fn helper_command(ctx: &Ctx, python: &str, runner: &Path, mode: &str, job_path: &Path, app_args: &[String]) -> Command {
+    let app_args = strip_launcher_selector(ctx, app_args);
+    let mut cmd = Command::new(python);
+    cmd.arg(runner)
+        .arg(mode)
+        .arg(job_path)
+        .arg("--")
+        .args(app_args)
+        .current_dir(&ctx.root)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::null());
+    cmd
 }
 
 fn helper(ctx: &Ctx, python: &str, mode: &str, job: Value, app_args: &[String]) -> Result<Output> {
@@ -150,16 +170,7 @@ fn helper(ctx: &Ctx, python: &str, mode: &str, job: Value, app_args: &[String]) 
     fs::write(&runner, RUNNER)?;
     let job_path = ctx.fast.join(format!("job-{mode}.json"));
     fs::write(&job_path, serde_json::to_vec_pretty(&job)?)?;
-    let mut cmd = Command::new(python);
-    cmd.arg(&runner)
-        .arg(mode)
-        .arg(&job_path)
-        .arg("--")
-        .args(app_args)
-        .current_dir(&ctx.root)
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUTF8", "1")
-        .stdin(Stdio::null());
+    let mut cmd = helper_command(ctx, python, &runner, mode, &job_path, app_args);
     if mode != "verify" {
         watch_workers(ctx, &mut cmd, &runner, &job_path, mode)?;
     }
@@ -1458,6 +1469,24 @@ sys.exit(1 if fails else 0)
             assert_eq!(exe, "C:\\Python313\\python.exe");
             let want = if cfg!(windows) { win_want } else { non_win_want };
             assert_eq!(got, want, "{cmd:?}");
+            // Verify profile and record pass the exact same stripped args to runner.py (no selector after --).
+            for mode in ["profile", "record"] {
+                let helper_cmd = helper_command(
+                    &ctx,
+                    "C:\\Python313\\python.exe",
+                    Path::new("runner.py"),
+                    mode,
+                    Path::new("job.json"),
+                    &cmd[1..],
+                );
+                let passed: Vec<String> = helper_cmd
+                    .get_args()
+                    .skip_while(|a| *a != "--")
+                    .skip(1)
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(passed, want, "{mode} runner args for {cmd:?}");
+            }
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1479,8 +1508,11 @@ sys.exit(1 if fails else 0)
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("work.py"), "def crunch(n: int) -> int:\n    return sum(i * i for i in range(n))\n")
             .unwrap();
-        fs::write(dir.join("app.py"), "from work import crunch\nif __name__ == '__main__':\n    print(crunch(200))\n")
-            .unwrap();
+        fs::write(
+            dir.join("app.py"),
+            "from work import crunch\nif __name__ == '__main__':\n    print(sum(crunch(500) for _ in range(50)))\n",
+        )
+        .unwrap();
         for cmd in [
             vec!["py".into(), "-3".into(), "app.py".into()],
             vec!["py".into(), format!("-{xy}"), "app.py".into()],
@@ -1492,6 +1524,9 @@ sys.exit(1 if fails else 0)
             let ctx = Ctx::open(&dir).unwrap();
             let (_, bench_args) = crate::backend::Lang::Python.bench_command(&ctx).unwrap();
             assert_eq!(bench_args, ["app.py"], "bench args for {cmd:?}");
+            let ported = crate::pipeline::port(&dir, Some("work.crunch"), 10)
+                .unwrap_or_else(|e| panic!("port {cmd:?} failed: {e:#}"));
+            assert_eq!(ported.calls_seen, 50, "recorded calls for {cmd:?}");
             crate::pipeline::bench(&dir, 1).unwrap_or_else(|e| panic!("bench {cmd:?} failed: {e:#}"));
         }
         let _ = fs::remove_dir_all(&dir);
