@@ -180,15 +180,15 @@ pub fn record(ctx: &Ctx, node: &str, args: &[String], hs: &Hotspot, out: &Path, 
     let backup = backup_dir.join(slug(&hs.file));
     fs::write(&backup, &original)?;
 
+    let runtime = runtime_of(node);
     let f = &target(&hs.name, hs.owner.as_deref());
-    let wrap = format!("{f} = globalThis.__fastAnythingWrap ? globalThis.__fastAnythingWrap({f}) : {f};");
+    let wrap = record_wrap(f, is_esm_file(&ctx.root, &file, runtime));
     let entry = hs.module.as_deref() == Some("__main__");
     let reassignable = redeclare(&original, "const", "let", f).unwrap_or_else(|| original.clone());
     fs::write(&file, add_marked(&reassignable, &format!("recording {}", hs.id), &wrap, entry))?;
     let recorder = ctx.fast.join("recorder.cjs");
     fs::write(&recorder, RECORDER)?;
     let meta = out.with_extension("meta.json");
-    let runtime = runtime_of(node);
     let recorder_text = recorder.to_string_lossy().into_owned();
     let mut options: Vec<&str> = match runtime {
         Runtime::Node => vec!["--require", &recorder_text],
@@ -551,27 +551,91 @@ fn is_esm(root: &Path, file: &Path) -> bool {
     false
 }
 
+/// Whether `file` runs as an ES module under `runtime`. Deno treats everything except .cjs/.cts as ESM.
+fn is_esm_file(root: &Path, file: &Path, runtime: Runtime) -> bool {
+    let cjs = matches!(file.extension().and_then(|e| e.to_str()), Some("cjs" | "cts"));
+    is_esm(root, file) || (runtime == Runtime::Deno && !cjs)
+}
+
 /// How the module refers to the function: its name, or Class.name for a static method.
 fn target(name: &str, owner: Option<&str>) -> String {
     owner.map_or_else(|| name.to_string(), |class| format!("{class}.{name}"))
 }
 
+/// CommonJS copies function references when `module.exports` / `exports` is assigned, so rebinding
+/// the local name at the end of the file alone does not update what callers got from `require()`.
+/// Sync any slot on `module.exports` still holding `orig` to `target` without invoking getters or
+/// throwing on read-only/frozen properties, preserving own properties attached to default exports.
+fn cjs_sync_exports(target: &str, orig: &str, indent: &str) -> String {
+    format!(
+        "{indent}if (typeof module === \"object\" && module !== null) {{\n\
+         {indent}  const _faMod = Object.getOwnPropertyDescriptor(module, \"exports\");\n\
+         {indent}  const _faExp = _faMod && \"value\" in _faMod ? _faMod.value : undefined;\n\
+         {indent}  if (_faExp === {orig}) {{\n\
+         {indent}    if (_faMod.writable) {{\n\
+         {indent}      if (typeof {target} === \"function\" && Object.isExtensible({target})) {{\n\
+         {indent}        for (const _faKey of Object.keys({orig})) {{\n\
+         {indent}          if (Object.hasOwn({target}, _faKey)) continue;\n\
+         {indent}          const _faDesc = Object.getOwnPropertyDescriptor({orig}, _faKey);\n\
+         {indent}          if (!_faDesc) continue;\n\
+         {indent}          if (\"value\" in _faDesc && _faDesc.value === {orig}) {{\n\
+         {indent}            Object.defineProperty({target}, _faKey, {{ ..._faDesc, value: {target} }});\n\
+         {indent}          }} else {{\n\
+         {indent}            Object.defineProperty({target}, _faKey, _faDesc);\n\
+         {indent}          }}\n\
+         {indent}        }}\n\
+         {indent}      }}\n\
+         {indent}      module.exports = {target};\n\
+         {indent}    }}\n\
+         {indent}  }} else if (_faExp && (typeof _faExp === \"object\" || typeof _faExp === \"function\")) {{\n\
+         {indent}    for (const _faKey of Object.keys(_faExp)) {{\n\
+         {indent}      const _faDesc = Object.getOwnPropertyDescriptor(_faExp, _faKey);\n\
+         {indent}      if (_faDesc && _faDesc.writable && _faDesc.value === {orig}) _faExp[_faKey] = {target};\n\
+         {indent}    }}\n\
+         {indent}  }}\n\
+         {indent}}}"
+    )
+}
+
+fn record_wrap(target: &str, esm: bool) -> String {
+    if esm {
+        return format!(
+            "{target} = globalThis.__fastAnythingWrap ? globalThis.__fastAnythingWrap({target}) : {target};"
+        );
+    }
+    let sync = cjs_sync_exports(target, "_faOrig", "  ");
+    format!(
+        "if (globalThis.__fastAnythingWrap) {{\n\
+         \x20 const _faOrig = {target};\n\
+         \x20 {target} = globalThis.__fastAnythingWrap(_faOrig);\n\
+         {sync}\n\
+         }}"
+    )
+}
+
 pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
+    let f = target(&port.func, port.owner.as_deref());
     let load = if esm {
         format!("process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(\"{addon_rel}\")")
     } else {
         format!("require(\"{addon_rel}\")")
     };
-    [
+    let mut lines = vec![
         "// Uses the verified Rust port. FAST_ANYTHING_DISABLE=1 runs the JavaScript above instead.".to_string(),
         format!("// Undo with:  fast-anything disable {}", port.id),
         "if (!process.env.FAST_ANYTHING_DISABLE) {".to_string(),
         "  try {".to_string(),
-        format!("    {} = {load}.{};", target(&port.func, port.owner.as_deref()), port.func),
-        "  } catch {}".to_string(),
-        "}".to_string(),
-    ]
-    .join("\n")
+    ];
+    if esm {
+        lines.push(format!("    {f} = {load}.{};", port.func));
+    } else {
+        lines.push(format!("    const _faOrig = {f};"));
+        lines.push(format!("    {f} = {load}.{};", port.func));
+        lines.push(cjs_sync_exports(&f, "_faOrig", "    "));
+    }
+    lines.push("  } catch {}".to_string());
+    lines.push("}".to_string());
+    lines.join("\n")
 }
 
 pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
@@ -582,10 +646,8 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     if !rel.starts_with("../") {
         rel = format!("./{rel}");
     }
-    // Deno treats every file as an ES module except .cjs/.cts
-    let deno = ctx.state.runtime.as_deref().is_some_and(|exe| runtime_of(exe) == Runtime::Deno);
-    let cjs = matches!(file.extension().and_then(|e| e.to_str()), Some("cjs" | "cts"));
-    let block = shim(port, &rel, is_esm(&ctx.root, &file) || (deno && !cjs));
+    let runtime = ctx.state.runtime.as_deref().map_or(Runtime::Node, runtime_of);
+    let block = shim(port, &rel, is_esm_file(&ctx.root, &file, runtime));
     fs::write(&file, with_shim(&text, port, &block)).with_context(|| format!("writing {}", port.file))
 }
 
@@ -841,9 +903,323 @@ mod tests {
         };
         let esm = shim(&port, "./.fast/lib/fa_fuzzy_levenshtein.node", true);
         assert!(esm.contains("createRequire(import.meta.url)(\"./.fast/lib/fa_fuzzy_levenshtein.node\").levenshtein"));
+        assert!(!esm.contains("module.exports"), "ESM shim must stay untouched: {esm}");
         assert!(shim(&port, "./x.node", false).contains("levenshtein = require(\"./x.node\").levenshtein;"));
         let original = "export function levenshtein(a, b) {\n  return 0;\n}\n";
         let on = backend::append_marked(original, "//", &port.id, &esm);
         assert_eq!(backend::strip_marked(&on, "//", &port.id), original);
+    }
+
+    #[test]
+    fn cjs_exports_are_recorded() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let cases = [
+            (
+                "object",
+                "function sq(x) {\n  return x * x;\n}\nmodule.exports = { sq };\n",
+                "const { sq } = require(\"./lib.js\");\nconsole.log(sq(2) + sq(3) + sq(4));\n",
+                3u64,
+            ),
+            (
+                "default",
+                "function sq(x) {\n  return x * x;\n}\nmodule.exports = sq;\n",
+                "const sq = require(\"./lib.js\");\nconsole.log(sq(2) + sq(3));\n",
+                2u64,
+            ),
+            (
+                "named",
+                "function sq(x) {\n  return x * x;\n}\nexports.sq = sq;\n",
+                "const { sq } = require(\"./lib.js\");\nconsole.log(sq(5));\n",
+                1u64,
+            ),
+            (
+                "alias-and-const",
+                "const sq = (x) => x * x;\nconst other = (x) => x + 1;\nmodule.exports = { sq, square: sq, other };\n",
+                "const { sq, square, other } = require(\"./lib.js\");\nif (other(3) !== 4) process.exit(2);\nconsole.log(sq(2) + square(3));\n",
+                2u64,
+            ),
+            (
+                "default-with-props",
+                "function sq(x) {\n  return x * x;\n}\nsq.helper = (x) => x + 1;\nsq.VERSION = \"1.0\";\nsq.default = sq;\nmodule.exports = sq;\n",
+                "const sq = require(\"./lib.js\");\nif (sq.helper(3) !== 4 || sq.VERSION !== \"1.0\") process.exit(2);\nconsole.log(sq(2) + sq.default(3));\n",
+                2u64,
+            ),
+            (
+                "function-container",
+                "function sq(x) {\n  return x * x;\n}\nfunction container() { return 0; }\ncontainer.sq = sq;\nmodule.exports = container;\n",
+                "const c = require(\"./lib.js\");\nconsole.log(c.sq(2) + c.sq(3));\n",
+                2u64,
+            ),
+            (
+                "getter-and-readonly",
+                "\"use strict\";\nfunction sq(x) {\n  return x * x;\n}\nconst ex = {};\nObject.defineProperty(ex, \"ro\", { value: sq, enumerable: true, writable: false });\nObject.defineProperty(ex, \"boom\", { enumerable: true, get() { throw new Error(\"getter ran\"); } });\nObject.defineProperty(ex, \"live\", { enumerable: true, get: () => sq });\nex.sq = sq;\nmodule.exports = ex;\n",
+                "const { sq, live } = require(\"./lib.js\");\nconsole.log(sq(4) + live(5));\n",
+                2u64,
+            ),
+            (
+                "readonly-module-exports",
+                "\"use strict\";\nfunction sq(x) {\n  return x * x;\n}\nObject.defineProperty(module, \"exports\", { value: sq, writable: false, configurable: false });\n",
+                "const sq = require(\"./lib.js\");\nconsole.log(sq(3));\n",
+                0u64,
+            ),
+            (
+                "null-exports",
+                "function sq(x) {\n  return x * x;\n}\nsq(2);\nmodule.exports = null;\n",
+                "require(\"./lib.js\");\n",
+                0u64,
+            ),
+            (
+                "auto-esm-module-null",
+                "const module = null;\nexport function sq(x) {\n  return x * x;\n}\n",
+                "import { sq } from \"./lib.js\";\nconsole.log(sq(3));\n",
+                1u64,
+            ),
+        ];
+        let base = std::env::temp_dir().join(format!("fa-node-cjs-rec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for (name, lib_src, app_src, expected_calls) in cases {
+            let dir = base.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("lib.js"), lib_src).unwrap();
+            fs::write(dir.join("app.js"), app_src).unwrap();
+            let ctx = Ctx::open(&dir).unwrap();
+            let hs = Hotspot {
+                id: "lib.sq".into(),
+                file: "lib.js".into(),
+                name: "sq".into(),
+                qualname: "sq".into(),
+                module: Some("lib".into()),
+                ..Default::default()
+            };
+            let out = dir.join("rec.jsonl");
+            let rec = record(&ctx, "node", &[String::from("app.js")], &hs, &out, 500);
+            let restored = fs::read_to_string(dir.join("lib.js")).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+            let rec = rec.unwrap_or_else(|e| panic!("{name}: record failed: {e:#}"));
+            assert_eq!(rec.calls, expected_calls, "{name}: wrong call count");
+            assert_eq!(rec.kept, expected_calls as usize, "{name}: wrong kept count");
+            assert_eq!(restored, lib_src, "{name}: lib.js must be restored byte for byte after record");
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cjs_exports_are_enabled_and_restored() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let cases = [
+            (
+                "object",
+                "function sq(x) {\n  return x * x;\n}\nmodule.exports = { sq };\n",
+                "const { sq } = require(\"./lib.js\");\nconsole.log(sq(3));\n",
+                "1009",
+                "9",
+            ),
+            (
+                "default",
+                "function sq(x) {\n  return x * x;\n}\nmodule.exports = sq;\n",
+                "const sq = require(\"./lib.js\");\nconsole.log(sq(3));\n",
+                "1009",
+                "9",
+            ),
+            (
+                "named",
+                "function sq(x) {\n  return x * x;\n}\nexports.sq = sq;\n",
+                "const { sq } = require(\"./lib.js\");\nconsole.log(sq(3));\n",
+                "1009",
+                "9",
+            ),
+            (
+                "alias-crlf-const",
+                "const sq = (x) => x * x;\r\nconst other = (x) => x + 1;\r\nmodule.exports = { sq, square: sq, other };\r\n",
+                "const { sq, square, other } = require(\"./lib.js\");\nconsole.log(`${sq(3)},${square(4)},${other(3)}`);\n",
+                "1009,1016,4",
+                "9,16,4",
+            ),
+            (
+                "default-with-props",
+                "function sq(x) {\n  return x * x;\n}\nsq.helper = (x) => x + 1;\nsq.VERSION = \"1.0\";\nsq.default = sq;\nmodule.exports = sq;\n",
+                "const sq = require(\"./lib.js\");\nconsole.log(`${sq(3)},${sq.default(4)},${sq.helper(3)},${sq.VERSION}`);\n",
+                "1009,1016,4,1.0",
+                "9,16,4,1.0",
+            ),
+            (
+                "function-container",
+                "function sq(x) {\n  return x * x;\n}\nfunction container() { return 0; }\ncontainer.sq = sq;\nmodule.exports = container;\n",
+                "const c = require(\"./lib.js\");\nconsole.log(c.sq(3));\n",
+                "1009",
+                "9",
+            ),
+            (
+                "getter-and-readonly",
+                "\"use strict\";\nfunction sq(x) {\n  return x * x;\n}\nconst ex = {};\nObject.defineProperty(ex, \"ro\", { value: sq, enumerable: true, writable: false });\nObject.defineProperty(ex, \"boom\", { enumerable: true, get() { throw new Error(\"getter ran\"); } });\nObject.defineProperty(ex, \"live\", { enumerable: true, get: () => sq });\nex.sq = sq;\nmodule.exports = ex;\n",
+                "const { sq, live } = require(\"./lib.js\");\nconsole.log(`${sq(3)},${live(4)}`);\n",
+                "1009,1016",
+                "9,16",
+            ),
+            (
+                "auto-esm-module-null",
+                "const module = null;\nexport function sq(x) {\n  return x * x;\n}\n",
+                "import { sq } from \"./lib.js\";\nconsole.log(sq(3));\n",
+                "9",
+                "9",
+            ),
+        ];
+        let base = std::env::temp_dir().join(format!("fa-node-cjs-en-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for (name, lib_src, app_src, want_rust, want_orig) in cases {
+            let dir = base.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("fake_addon.cjs"), "module.exports = { sq: (x) => x * x + 1000 };\n").unwrap();
+            fs::write(dir.join("app.js"), app_src).unwrap();
+            let port = Port {
+                id: "lib.sq".into(),
+                file: "lib.js".into(),
+                module: "lib".into(),
+                func: "sq".into(),
+                ext: "fa_lib_sq".into(),
+                crate_dir: ".fast/ports/lib.sq".into(),
+                recorded: 1,
+                calls_seen: 1,
+                verify: None,
+                enabled: false,
+                lang: backend::Lang::Node,
+                owner: None,
+                line: 1,
+                sources: vec![],
+            };
+            let enabled = with_shim(lib_src, &port, &shim(&port, "./fake_addon.cjs", false));
+            fs::write(dir.join("lib.js"), &enabled).unwrap();
+            let rust_run =
+                Command::new("node").arg("app.js").current_dir(&dir).env_remove(DISABLE_ENV).output().unwrap();
+            let orig_run = Command::new("node").arg("app.js").current_dir(&dir).env(DISABLE_ENV, "1").output().unwrap();
+            let restored = without_shim(&enabled, &port);
+
+            // Also verify real enable()/disable() round-trip on disk.
+            fs::write(dir.join("lib.js"), lib_src).unwrap();
+            let ctx = Ctx::open(&dir).unwrap();
+            enable(&ctx, &port).unwrap();
+            let on_disk = fs::read_to_string(dir.join("lib.js")).unwrap();
+            disable(&ctx, &port).unwrap();
+            let back_on_disk = fs::read_to_string(dir.join("lib.js")).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+
+            assert!(rust_run.status.success(), "{name}: enabled run failed: {}", combined(&rust_run));
+            assert_eq!(String::from_utf8_lossy(&rust_run.stdout).trim(), want_rust, "{name}: enabled output");
+            assert!(orig_run.status.success(), "{name}: disabled run failed: {}", combined(&orig_run));
+            assert_eq!(String::from_utf8_lossy(&orig_run.stdout).trim(), want_orig, "{name}: disabled output");
+            assert_eq!(restored, lib_src, "{name}: without_shim must restore byte for byte");
+            assert!(on_disk.contains("module.exports"), "{name}: CJS enable should include exports sync");
+            assert_eq!(back_on_disk, lib_src, "{name}: disable must restore byte for byte");
+        }
+
+        // ESM files keep the original ESM path unchanged and restore byte for byte.
+        let esm_dir = base.join("esm");
+        fs::create_dir_all(&esm_dir).unwrap();
+        let esm_src = "export function sq(x) {\n  return x * x;\n}\n";
+        fs::write(esm_dir.join("lib.mjs"), esm_src).unwrap();
+        let ctx = Ctx::open(&esm_dir).unwrap();
+        let esm_port = Port {
+            id: "lib.sq".into(),
+            file: "lib.mjs".into(),
+            module: "lib".into(),
+            func: "sq".into(),
+            ext: "fa_lib_sq".into(),
+            crate_dir: ".fast/ports/lib.sq".into(),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: backend::Lang::Node,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        enable(&ctx, &esm_port).unwrap();
+        let esm_on = fs::read_to_string(esm_dir.join("lib.mjs")).unwrap();
+        disable(&ctx, &esm_port).unwrap();
+        let esm_off = fs::read_to_string(esm_dir.join("lib.mjs")).unwrap();
+        assert!(!esm_on.contains("module.exports"), "ESM enable must not add CJS sync: {esm_on}");
+        assert_eq!(esm_off, esm_src, "ESM disable must restore byte for byte");
+
+        // Verify two const functions in the same CJS file don't collide on _faOrig and restore byte for byte.
+        let two_dir = base.join("two");
+        fs::create_dir_all(&two_dir).unwrap();
+        let two_src = "const a = (x) => x + 1;\nconst b = (x) => x + 2;\nmodule.exports = { a, b };\n";
+        fs::write(two_dir.join("fake_addon.cjs"), "module.exports = { a: (x) => x + 100, b: (x) => x + 200 };\n")
+            .unwrap();
+        fs::write(two_dir.join("app.js"), "const { a, b } = require(\"./lib.js\");\nconsole.log(`${a(1)},${b(1)}`);\n")
+            .unwrap();
+        let mk_port = |func: &str| Port {
+            id: format!("lib.{func}"),
+            file: "lib.js".into(),
+            module: "lib".into(),
+            func: func.into(),
+            ext: format!("fa_lib_{func}"),
+            crate_dir: format!(".fast/ports/lib.{func}"),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: backend::Lang::Node,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        let (pa, pb) = (mk_port("a"), mk_port("b"));
+        let on_a = with_shim(two_src, &pa, &shim(&pa, "./fake_addon.cjs", false));
+        let on_ab = with_shim(&on_a, &pb, &shim(&pb, "./fake_addon.cjs", false));
+        fs::write(two_dir.join("lib.js"), &on_ab).unwrap();
+        let two_run =
+            Command::new("node").arg("app.js").current_dir(&two_dir).env_remove(DISABLE_ENV).output().unwrap();
+        assert!(two_run.status.success(), "two-port run failed: {}", combined(&two_run));
+        assert_eq!(String::from_utf8_lossy(&two_run.stdout).trim(), "101,201");
+        assert_eq!(without_shim(&without_shim(&on_ab, &pa), &pb), two_src);
+
+        // Verify CJS record_wrap is a safe no-op when __fastAnythingWrap is unset, and ESM record_wrap has no CJS sync.
+        let nowrap_dir = base.join("nowrap");
+        fs::create_dir_all(&nowrap_dir).unwrap();
+        let nw_src = "function sq(x) {\n  return x * x;\n}\nmodule.exports = { sq };\n";
+        let nw_wrapped = add_marked(nw_src, "recording lib.sq", &record_wrap("sq", false), false);
+        fs::write(nowrap_dir.join("lib.js"), &nw_wrapped).unwrap();
+        fs::write(nowrap_dir.join("app.js"), "const { sq } = require(\"./lib.js\");\nconsole.log(sq(4));\n").unwrap();
+        let nw_run = Command::new("node").arg("app.js").current_dir(&nowrap_dir).output().unwrap();
+        assert!(nw_run.status.success(), "nowrap failed: {}", combined(&nw_run));
+        assert_eq!(String::from_utf8_lossy(&nw_run.stdout).trim(), "16");
+        assert!(!record_wrap("sq", true).contains("module.exports"));
+
+        // Verify static method exported via class and aliased property in CJS.
+        let st_dir = base.join("static");
+        fs::create_dir_all(&st_dir).unwrap();
+        let st_src =
+            "class Calc {\n  static sq(x) {\n    return x * x;\n  }\n}\nmodule.exports = { Calc, sq: Calc.sq };\n";
+        fs::write(st_dir.join("fake_addon.cjs"), "module.exports = { sq: (x) => x * x + 1000 };\n").unwrap();
+        fs::write(
+            st_dir.join("app.js"),
+            "const { Calc, sq } = require(\"./lib.js\");\nconsole.log(`${Calc.sq(3)},${sq(4)}`);\n",
+        )
+        .unwrap();
+        let st_port = Port { owner: Some("Calc".into()), id: "lib.Calc.sq".into(), ..mk_port("sq") };
+        let st_on = with_shim(st_src, &st_port, &shim(&st_port, "./fake_addon.cjs", false));
+        fs::write(st_dir.join("lib.js"), &st_on).unwrap();
+        let st_run = Command::new("node").arg("app.js").current_dir(&st_dir).env_remove(DISABLE_ENV).output().unwrap();
+        assert!(st_run.status.success(), "static CJS run failed: {}", combined(&st_run));
+        assert_eq!(String::from_utf8_lossy(&st_run.stdout).trim(), "1009,1016");
+        assert_eq!(without_shim(&st_on, &st_port), st_src);
+
+        // Verify is_esm_file across runtimes and extensions.
+        assert!(!is_esm_file(&base, &base.join("a.js"), Runtime::Node));
+        assert!(is_esm_file(&base, &base.join("a.mjs"), Runtime::Node));
+        assert!(is_esm_file(&base, &base.join("a.js"), Runtime::Deno));
+        assert!(is_esm_file(&base, &base.join("a.ts"), Runtime::Deno));
+        assert!(!is_esm_file(&base, &base.join("a.cjs"), Runtime::Deno));
+        assert!(!is_esm_file(&base, &base.join("a.cts"), Runtime::Deno));
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
