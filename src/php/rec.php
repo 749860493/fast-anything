@@ -100,18 +100,129 @@ final class FastAnythingRec
         return $out;
     }
 
+    // an accent, CJK, an emoji with a modifier, a combining mark
+    private const NON_ASCII = ["\u{e9}", "\u{65e5}\u{672c}", "\u{1f44d}\u{1f3fd}", "e\u{301}"];
+
+    /** Inputs where ports and originals tend to part ways, of the same type as the recorded value. */
+    private static function edges($v): array
+    {
+        $out = [];
+        if (is_int($v)) {
+            foreach ([0, 1, -1] as $x) if ($x !== $v) $out[] = $x;
+        } elseif (is_float($v)) {
+            foreach ([0.0, 1.0, -1.0, 1e300, 5e-324] as $x) if ($x !== $v) $out[] = $x;
+        } elseif (is_string($v)) {
+            $chars = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY);
+            if ($chars === false) return [];
+            $mid = intdiv(count($chars), 2);
+            $a = self::NON_ASCII;
+            $head = implode('', array_slice($chars, 0, $mid));
+            $tail = implode('', array_slice($chars, $mid));
+            foreach ([$head . $a[0] . $tail, $v . $a[1], $a[2] . $v, $v . $a[3], ''] as $x) if ($x !== $v) $out[] = $x;
+        } elseif (is_array($v) && $v && array_is_list($v)) {
+            $out[] = [];
+            foreach (array_slice(self::edges($v[0]), 0, 4) as $e) {
+                $c = $v;
+                $c[0] = $e;
+                $out[] = $c;
+            }
+        }
+        return $out;
+    }
+
+    /** A short version of a recorded value, so edge cases stay cheap when the real inputs are big. */
+    private static function small($v)
+    {
+        if (is_string($v)) {
+            $chars = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY);
+            return $chars !== false && count($chars) > 64 ? implode('', array_slice($chars, 0, 64)) : $v;
+        }
+        return is_array($v) && array_is_list($v) && count($v) > 8 ? array_slice($v, 0, 8) : $v;
+    }
+
+    /** The value repeated $factor times (null past 4096 items or characters). */
+    private static function bigger($v, int $factor)
+    {
+        if (is_string($v)) {
+            $n = preg_match_all('/./su', $v);
+            return $n && $n * $factor <= 4096 ? str_repeat($v, $factor) : null;
+        }
+        if (is_array($v) && $v && array_is_list($v) && count($v) * $factor <= 4096) {
+            return array_merge(...array_fill(0, $factor, $v));
+        }
+        return null;
+    }
+
+    /** How long the original took on $args (ns), or null if it threw: outside its domain, not a fair test. */
+    private static function attempt(array $args, array &$derived, array &$seen, string $tag): ?int
+    {
+        try {
+            $enc = self::enc($args);
+            if (isset($seen[$enc])) return null;
+            $seen[$enc] = true;
+            $t = hrtime(true);
+            $r = (self::$fn)(...$args);
+            $took = hrtime(true) - $t;
+            $derived[] = '{"args":' . $enc . ',"result":' . self::enc($r) . ',"derived":' . $tag . '}';
+            return $took;
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+
     public static function save(): void
     {
         self::$inside = true;
         $derived = [];
         $seen = [];
+        // Edge cases first, from a sample of recorded calls: special numbers, non-ASCII text, empty and
+        // much bigger inputs. The original answers them; inputs it throws on are skipped.
+        $start = hrtime(true);
+        $edgeLeft = fn() => 1.5e9 - (hrtime(true) - $start);
+        $grown = [];
+        $sampled = 0;
+        if (self::$fn !== null) {
+            foreach (self::$args as $args) {
+                if ($args === null) continue;
+                if (++$sampled > 20) break;
+                $base = array_map(fn($a) => self::small($a), $args);
+                foreach ($base as $i => $arg) {
+                    foreach (self::edges($arg) as $e) {
+                        if (count($derived) >= 100 || $edgeLeft() <= 0) break 3;
+                        $next = $base;
+                        $next[$i] = $e;
+                        self::attempt($next, $derived, $seen, '"edge"');
+                    }
+                    if (isset($grown[$i]) || self::bigger($arg, 4) === null) continue;
+                    // much bigger inputs, only while their time (assumed quadratic) fits the budget
+                    $grown[$i] = true;
+                    try {
+                        $t = hrtime(true);
+                        (self::$fn)(...$base);
+                        $took = hrtime(true) - $t;
+                    } catch (Throwable $e) {
+                        continue;
+                    }
+                    // 4x bigger each step, from the short version of the input, up to 4096 items or characters
+                    foreach ([4, 16, 64, 256, 512] as $factor) {
+                        $big = self::bigger($arg, $factor);
+                        if ($big === null || count($derived) >= 100 || $took * 16 > $edgeLeft() / 2) break;
+                        $next = $base;
+                        $next[$i] = $big;
+                        $took = self::attempt($next, $derived, $seen, '"edge"');
+                        if ($took === null) break;
+                    }
+                }
+            }
+        }
+        $edges = count($derived);
         $start = hrtime(true);
         if (self::$fn !== null) {
             foreach (self::$args as $args) {
                 if ($args === null) continue;
                 foreach ($args as $i => $arg) {
                     foreach (self::variants($arg) as $smaller) {
-                        if (count($derived) >= 200 || hrtime(true) - $start > 3e9) break 3;
+                        if (count($derived) >= 200 + $edges || hrtime(true) - $start > 3e9) break 3;
                         $next = $args;
                         $next[$i] = $smaller;
                         try {
