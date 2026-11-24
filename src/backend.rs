@@ -124,9 +124,9 @@ impl Lang {
         }
     }
 
-    pub fn resolve(self, program: &str, root: &Path) -> Result<String> {
+    pub fn resolve(self, program: &str, args: &[String], root: &Path) -> Result<String> {
         match self {
-            Lang::Python => python::resolve(program, root),
+            Lang::Python => python::resolve(program, args, root),
             Lang::Node => node::resolve(program, root),
             Lang::Ruby => ruby::resolve(program, root),
             Lang::Java => java::resolve(program, root),
@@ -241,6 +241,7 @@ impl Lang {
     pub fn bench_command(self, ctx: &Ctx) -> Result<(String, Vec<String>)> {
         let exe = ctx.runtime()?;
         match self {
+            Lang::Python => python::bench_command(ctx, exe),
             Lang::Go => golang::bench_command(ctx, exe),
             Lang::Java | Lang::Kotlin => java::bench_command(ctx, exe),
             Lang::C | Lang::Cpp => cfamily::bench_command(ctx, exe),
