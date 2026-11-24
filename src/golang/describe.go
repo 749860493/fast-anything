@@ -178,21 +178,35 @@ func describe(fset *token.FileSet, src []byte, path, pkg, pkgName string, fd *as
 			locals[n.Name] = true
 		}
 	}
-	results := fd.Type.Results
+	// result types, one per result (named results are locals of the function too)
+	var results []string
+	if fd.Type.Results != nil {
+		for _, field := range fd.Type.Results.List {
+			t := types.ExprString(field.Type)
+			if len(field.Names) == 0 {
+				results = append(results, t)
+			}
+			for _, n := range field.Names {
+				results = append(results, t)
+				locals[n.Name] = true
+			}
+		}
+	}
 	switch {
-	case results == nil || len(results.List) == 0:
+	case len(results) == 0:
 		fn.Blockers = append(fn.Blockers, "returns nothing")
-	case len(results.List) > 1 || len(results.List[0].Names) > 1:
-		fn.Blockers = append(fn.Blockers, "returns more than one value")
-	default:
-		t := types.ExprString(results.List[0].Type)
+	case len(results) == 1 || (len(results) == 2 && results[1] == "error"):
+		// a value, or a value and an error: (T, error), which the port gives as Result<T, String>
+		t := results[0]
+		if len(results) == 2 {
+			t = "(" + t + ", error)"
+		}
 		fn.Returns = &t
-		if !supported(t) {
-			fn.Blockers = append(fn.Blockers, "returns a "+t)
+		if !supported(results[0]) {
+			fn.Blockers = append(fn.Blockers, "returns a "+results[0])
 		}
-		if len(results.List[0].Names) > 0 {
-			fn.Blockers = append(fn.Blockers, "has named results")
-		}
+	default:
+		fn.Blockers = append(fn.Blockers, "returns more than one value (other than a value and an error)")
 	}
 	io, nondet, helpers := []string{}, []string{}, []string{}
 	seen := map[string]bool{}
