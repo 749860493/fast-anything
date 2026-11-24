@@ -712,6 +712,545 @@ mod tests {
         assert_eq!(leftovers, 0, "worker files are absorbed and removed");
     }
 
+    /// Calls reached through an import: `readFileSync` after `import { readFileSync } from "node:fs"`,
+    /// `cp.spawnSync` after `const cp = require("child_process")`. Each case says what scan must block,
+    /// and what it must leave alone (pure members, shadowed names, the app's own modules, comments).
+    const IMPORT_CASES: &[(&str, &str, &str, &[&str])] = &[
+        (
+            "named",
+            "import { readFileSync } from \"node:fs\";\nexport function f(p) {\n  return readFileSync(p, \"utf8\").length;\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "alias",
+            "import { execSync as run } from \"child_process\";\nexport function f(x) {\n  run(\"true\");\n  return x;\n}\n",
+            "f",
+            &["does I/O: child_process.execSync"],
+        ),
+        (
+            "namespace",
+            "import * as files from \"node:fs\";\nexport function f(p) {\n  return files.statSync(p).size;\n}\n",
+            "f",
+            &["does I/O: fs.statSync"],
+        ),
+        (
+            "default",
+            "import disk from \"fs\";\nexport function f(p, x) {\n  disk.writeFileSync(p, String(x));\n  return x;\n}\n",
+            "f",
+            &["does I/O: fs.writeFileSync"],
+        ),
+        (
+            "promises member",
+            "import { promises as fsp } from \"fs\";\nexport function f(p) {\n  return fsp.stat(p);\n}\n",
+            "f",
+            &["does I/O: fs.promises"],
+        ),
+        (
+            "fs/promises",
+            "import { readFile } from \"node:fs/promises\";\nexport function f(p) {\n  return readFile(p);\n}\n",
+            "f",
+            &["does I/O: fs.readFile"],
+        ),
+        (
+            "multi-line",
+            "import {\n  readFileSync,\n  statSync,\n} from \"node:fs\";\nexport function f(p) {\n  return statSync(p).size;\n}\n",
+            "f",
+            &["does I/O: fs.statSync"],
+        ),
+        (
+            "random",
+            "import { randomInt } from \"node:crypto\";\nexport function f(x) {\n  return x + randomInt(10);\n}\n",
+            "f",
+            &["not deterministic: crypto.randomInt"],
+        ),
+        (
+            "perf alias",
+            "import { performance as perf } from \"node:perf_hooks\";\nexport function f(x) {\n  return x + perf.now();\n}\n",
+            "f",
+            &["not deterministic: perf_hooks.performance"],
+        ),
+        (
+            "process member",
+            "import { env } from \"node:process\";\nexport function f(x) {\n  return env.HOME ?? x;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "require destructure",
+            "const { readFileSync: rd } = require(\"fs\");\nfunction f(p) {\n  return rd(p).length;\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "require module",
+            "const cp = require(\"node:child_process\");\nfunction f(x) {\n  cp.spawnSync(\"true\");\n  return x;\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: child_process.spawnSync"],
+        ),
+        (
+            "require member",
+            "const fsp = require(\"fs\").promises;\nfunction f(p) {\n  return fsp.readFile(p);\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: fs.promises"],
+        ),
+        (
+            "fs as fs, once",
+            "import fs from \"node:fs\";\nexport function f(p) {\n  return fs.readFileSync(p).length;\n}\n",
+            "f",
+            &["does I/O: fs"],
+        ),
+        (
+            "hash pure",
+            "import { createHash } from \"node:crypto\";\nexport function f(s) {\n  return createHash(\"sha1\").update(s).digest(\"hex\");\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "path pure",
+            "import { join } from \"node:path\";\nexport function f(a, b) {\n  return join(a, b);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "fs.constants pure",
+            "import { constants } from \"node:fs\";\nexport function f(x) {\n  return constants.F_OK + x;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "net.isIP pure",
+            "import * as net from \"node:net\";\nexport function f(s) {\n  return net.isIP(s) === 4;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "param shadow",
+            "import { env } from \"node:process\";\nexport function f(env) {\n  return env.k;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "local shadow",
+            "import { readFileSync } from \"fs\";\nexport function f(x) {\n  const readFileSync = (v) => v + 1;\n  return readFileSync(x);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "arrow param shadow",
+            "import * as os from \"node:os\";\nexport function f(items) {\n  return items.map((os) => os.name);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "object key",
+            "import { env } from \"node:process\";\nexport function f(x) {\n  return { env: x };\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "commented import",
+            "/*\nimport { statSync } from \"fs\";\n*/\nfunction statSync(x) {\n  return { size: x };\n}\nexport function f(x) {\n  return statSync(x).size;\n}\n",
+            "f",
+            &[],
+        ),
+        ("own module", "import { load } from \"./io.mjs\";\nexport function f(x) {\n  return load(x);\n}\n", "f", &[]),
+        (
+            "other function",
+            "import { readFileSync } from \"fs\";\nexport function load(p) {\n  return readFileSync(p);\n}\nexport function f(x) {\n  return x * 2;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "type import",
+            "import type { Stats } from \"node:fs\";\nexport function f(s: Stats): number {\n  return s.size;\n}\n",
+            "f",
+            &[],
+        ),
+        // a name taken over in one place still counts everywhere else
+        (
+            "arrow shadow, used outside it",
+            "import * as os from \"node:os\";\nexport function f(items) {\n  const host = os.hostname();\n  return items.map((os) => os.name).concat(host);\n}\n",
+            "f",
+            &["does I/O: os.hostname"],
+        ),
+        (
+            "used in a default",
+            "import { readFileSync } from \"node:fs\";\nexport function f(p, fallback = readFileSync(\"/x\", \"utf8\")) {\n  return readFileSync(p, \"utf8\") || fallback;\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "used in an arrow's default",
+            "import { env } from \"node:process\";\nexport function f(xs) {\n  return xs.map((x = env.DEFAULT) => x);\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "destructured key",
+            "import { env } from \"node:process\";\nexport function f(cfg) {\n  const { env: mode } = cfg;\n  return mode + env.HOME;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "computed key",
+            "import { env } from \"node:process\";\nexport function f(cfg) {\n  const { [env.KEY]: val } = cfg;\n  return val;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "parameter pattern key",
+            "import { env } from \"node:process\";\nexport function f({ env: mode }) {\n  return mode + env.HOME;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "for-of pattern",
+            "import { env } from \"node:process\";\nexport function f(items, t) {\n  for (const { a } of items) t[env.HOME] = a;\n  return t;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        // import forms
+        (
+            "comment in an import",
+            "import {\n  // sync read\n  readFileSync,\n} from \"node:fs\";\nexport function f(p) {\n  return readFileSync(p, \"utf8\").length;\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "require, comment inside",
+            "const {\n  readFileSync, // reads\n  statSync,\n} = require(\"node:fs\");\nfunction f(p) {\n  return statSync(p).size;\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: fs.statSync"],
+        ),
+        (
+            "require, defaults",
+            "const { fn = () => 1, readFileSync } = require(\"node:fs\");\nfunction f(p) {\n  return readFileSync(p).length;\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "require, nested",
+            "const { promises: { readFile } } = require(\"node:fs\");\nfunction f(p) {\n  return readFile(p);\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: fs.promises"],
+        ),
+        (
+            "require, .default",
+            "const { randomBytes } = require(\"node:crypto\").default;\nfunction f() {\n  return randomBytes(16).toString(\"hex\");\n}\nmodule.exports = { f };\n",
+            "f",
+            &["not deterministic: crypto.randomBytes"],
+        ),
+        (
+            "require, .default pure",
+            "const { isIP } = require(\"node:net\").default;\nfunction f(s) {\n  return isIP(s);\n}\nmodule.exports = { f };\n",
+            "f",
+            &[],
+        ),
+        (
+            "require in a function keeps the top one",
+            "const { readFileSync: run } = require(\"node:fs\");\nfunction helper() {\n  const run = require(\"node:path\").join;\n  return run(\"a\", \"b\");\n}\nfunction f(p) {\n  return run(p, \"utf8\").length;\n}\nmodule.exports = { helper, f };\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "require in a function stays there",
+            "const env = { scale: 2 };\nfunction readHome() {\n  const { env } = require(\"node:process\");\n  return env.HOME;\n}\nfunction f(x) {\n  return x * env.scale;\n}\nmodule.exports = { readHome, f };\n",
+            "f",
+            &[],
+        ),
+        (
+            "compact import",
+            "import{readFileSync}from\"node:fs\";\nexport function f(p) {\n  return readFileSync(p).length;\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "type: import = require",
+            "import cp = require(\"node:child_process\");\nexport function f(x: number): number {\n  cp.spawnSync(\"true\");\n  return x;\n}\n",
+            "f",
+            &["does I/O: child_process.spawnSync"],
+        ),
+        (
+            "top-level alias",
+            "import fs from \"node:fs\";\nconst { readFileSync } = fs;\nexport function f(p) {\n  return readFileSync(p).length;\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "member named type",
+            "import { type as osType } from \"node:os\";\nexport function f() {\n  return osType();\n}\n",
+            "f",
+            &["does I/O: os.type"],
+        ),
+        // modules and members
+        (
+            "console",
+            "import { log } from \"node:console\";\nexport function f(x) {\n  log(x);\n  return x * 2;\n}\n",
+            "f",
+            &["does I/O: console.log"],
+        ),
+        (
+            "pseudoRandomBytes",
+            "import { pseudoRandomBytes } from \"node:crypto\";\nexport function f() {\n  return pseudoRandomBytes(16).toString(\"hex\");\n}\n",
+            "f",
+            &["not deterministic: crypto.pseudoRandomBytes"],
+        ),
+        (
+            "crypto destructured",
+            "import * as c from \"node:crypto\";\nexport function f() {\n  const { randomUUID } = c;\n  return randomUUID();\n}\n",
+            "f",
+            &["not deterministic: crypto"],
+        ),
+        // names that aren't the import
+        (
+            "method shorthand",
+            "import { env } from \"node:process\";\nexport function f(x) {\n  return { env(v) { return v + 1; } }.env(x);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "function expression param",
+            "import * as os from \"node:os\";\nexport function f(items) {\n  return items.map(function (os) {\n    return os.name;\n  });\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "nested function param",
+            "import { env } from \"node:process\";\nexport function f() {\n  function getK(env) {\n    return env.k;\n  }\n  return getK({ k: 1 });\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "second declarator",
+            "import { readFileSync } from \"node:fs\";\nexport function f(x) {\n  const a = 1, readFileSync = (v) => v + 1;\n  return readFileSync(x) + a;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "type: optional key",
+            "import { env } from \"node:process\";\nexport function f(x: string): string {\n  const cfg: { env?: string } = { env: x };\n  return cfg.env;\n}\n",
+            "f",
+            &[],
+        ),
+        // scopes that end where JavaScript ends them
+        (
+            "for-of loop variable",
+            "import { env } from \"node:process\";\nexport function f(items) {\n  for (const env of items) {\n    if (env.stop) break;\n  }\n  return env.HOME;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "var in a nested function",
+            "import { env } from \"node:process\";\nexport function f() {\n  function helper() {\n    var env = { HOME: \"x\" };\n    return env.HOME;\n  }\n  return env.HOME + helper();\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "var in an arrow",
+            "import { env } from \"node:process\";\nexport function f(items) {\n  const xs = items.map((x) => { var env = x; return env; });\n  return env.HOME + xs;\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "named function expression",
+            "import { readFileSync } from \"node:fs\";\nexport function f(p) {\n  const g = function readFileSync(x) { return x; };\n  return readFileSync(p).length + g(1);\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "arrow without semicolons",
+            "import * as os from \"node:os\";\nexport function f() {\n  const getName = (os) => os.name\n  return os.hostname() + getName({ name: 1 })\n}\n",
+            "f",
+            &["does I/O: os.hostname"],
+        ),
+        (
+            "arrow in a ternary",
+            "import * as os from \"node:os\";\nexport function f(x) {\n  return x ? (os) => os.name : os.hostname();\n}\n",
+            "f",
+            &["does I/O: os.hostname"],
+        ),
+        (
+            "arrow with a ternary body",
+            "import * as os from \"node:os\";\nexport function f(items, c) {\n  return items.map((os) => (c ? os.a : os.b));\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "call in a ternary",
+            "import { readFileSync } from \"node:fs\";\nexport function f(cond, p) {\n  return cond ? JSON.parse(readFileSync(p, \"utf8\")) : { empty: true };\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "type: function type annotation",
+            "import { env } from \"node:process\";\nexport function f(): number {\n  const fn: (env: string) => number = () => env.HOME.length;\n  return fn(\"a\");\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "type: arrow return type",
+            "import * as os from \"node:os\";\nexport function f(items: Array<{ name: string }>): string[] {\n  return items.map((os): string => os.name);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "type: generic nested function",
+            "import { env } from \"node:process\";\nexport function f(): number {\n  function id<T>(env: T): T {\n    return env;\n  }\n  return id(1);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "type: key after a semicolon",
+            "import { env } from \"node:process\";\nexport function f(x: string): string {\n  const cfg: { a: number; env?: string } = { a: 1, env: x };\n  return cfg.env ?? \"\";\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "type: import type{",
+            "import type{ Stats } from \"node:fs\";\nexport function f(x: unknown): boolean {\n  const s = x as Stats;\n  return s.size > 0;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "comparison before a binding",
+            "import { env } from \"node:process\";\nexport function f(x) {\n  const ok = x < 10, env = { k: x };\n  return env.k + ok;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "declaration over two lines",
+            "import { readFileSync } from \"node:fs\";\nexport function f(x) {\n  const a = x +\n    1, readFileSync = (v) => v;\n  return readFileSync(a);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "property on the next line",
+            "import { exec } from \"node:child_process\";\nexport function f(re, s) {\n  return re\n    .exec(s);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "import in a template string",
+            "const doc = `\nimport { readFileSync } from \"fs\";\n`;\nfunction readFileSync(x) {\n  return x;\n}\nexport function f(x) {\n  return readFileSync(x) + doc;\n}\n",
+            "f",
+            &[],
+        ),
+        // more import forms
+        (
+            "require, no semicolons",
+            "const { a } = getConfig()\nconst { readFileSync } = require(\"node:fs\")\nfunction f(p) {\n  return readFileSync(p, \"utf8\").length\n}\nfunction getConfig() {\n  return { a: 1 }\n}\nmodule.exports = { f, a }\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "require, rest",
+            "const { createHash, ...rest } = require(\"node:crypto\");\nfunction f() {\n  return rest.randomInt(10);\n}\nmodule.exports = { f, createHash };\n",
+            "f",
+            &["not deterministic: crypto.randomInt"],
+        ),
+        (
+            "require, after a regex with a brace",
+            "const OPEN = /\\{/;\nconst { readFileSync } = require(\"node:fs\");\nfunction f(p) {\n  return readFileSync(p, \"utf8\").length + OPEN.source.length;\n}\nmodule.exports = { f };\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "require, .default.member pure",
+            "const isIP = require(\"node:net\").default.isIP;\nfunction f(s) {\n  return isIP(s) === 4;\n}\nmodule.exports = { f };\n",
+            "f",
+            &[],
+        ),
+        (
+            "chained alias",
+            "import fs from \"node:fs\";\nconst read = fs.promises.readFile;\nexport function f(p) {\n  return read(p);\n}\n",
+            "f",
+            &["does I/O: fs.promises"],
+        ),
+        (
+            "exported alias",
+            "import fs from \"node:fs\";\nexport const { readFileSync } = fs;\nexport function f(p) {\n  return readFileSync(p).length;\n}\n",
+            "f",
+            &["does I/O: fs.readFileSync"],
+        ),
+        (
+            "type: as const without semicolons",
+            "import { writeFileSync } from \"node:fs\";\nexport function f(p: string) {\n  const opts = { encoding: \"utf8\" } as const\n  writeFileSync(p, \"hi\", opts)\n  return 1\n}\n",
+            "f",
+            &["does I/O: fs.writeFileSync"],
+        ),
+        (
+            "type: a function type's parameter",
+            "import { env } from \"node:process\";\nexport function f(): number {\n  const fn: (env: string) => number = (s) => s.length;\n  return fn(\"a\");\n}\n",
+            "f",
+            &[],
+        ),
+    ];
+
+    #[test]
+    fn scan_sees_io_reached_through_an_import() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        // the profile step describes the 40 hottest functions: 30 cases a run
+        for (chunk, cases) in IMPORT_CASES.chunks(30).enumerate() {
+            let dir = std::env::temp_dir().join(format!("fa-node-imports-{}-{chunk}", std::process::id()));
+            let prof = dir.join("cpuprof");
+            fs::create_dir_all(&prof).unwrap();
+            // a made-up profile with one sample in each case's function
+            let root = json!({ "functionName": "(root)", "url": "", "lineNumber": -1, "columnNumber": -1 });
+            let mut nodes = vec![json!({ "id": 1, "callFrame": root, "children": [] })];
+            for (i, (name, src, func, _)) in cases.iter().enumerate() {
+                let ext = if name.starts_with("require") {
+                    "cjs"
+                } else if name.starts_with("type") {
+                    "ts"
+                } else {
+                    "mjs"
+                };
+                let file = dir.join(format!("case{i}.{ext}"));
+                fs::write(&file, src).unwrap();
+                let line = src.lines().position(|l| l.contains(&format!("function {func}("))).unwrap();
+                let url = format!("file://{}", file.display());
+                let frame = json!({ "functionName": func, "url": url, "lineNumber": line, "columnNumber": 0 });
+                nodes.push(json!({ "id": i + 2, "callFrame": frame, "children": [] }));
+            }
+            let ids: Vec<usize> = (2..cases.len() + 2).collect();
+            nodes[0]["children"] = json!(ids);
+            let deltas = vec![1000; ids.len()];
+            let profile =
+                json!({ "nodes": nodes, "startTime": 0, "endTime": 1_000_000, "samples": ids, "timeDeltas": deltas });
+            fs::write(prof.join("a.cpuprofile"), profile.to_string()).unwrap();
+            fs::write(dir.join("runner.mjs"), RUNNER).unwrap();
+            let result = dir.join("profile.json");
+            let job = json!({ "root": dir, "dir": prof, "entry": dir.join("main.mjs"), "out": result });
+            fs::write(dir.join("job.json"), job.to_string()).unwrap();
+            let out =
+                Command::new("node").args(["runner.mjs", "profile", "job.json"]).current_dir(&dir).output().unwrap();
+            let result = fs::read_to_string(&result).unwrap_or_default();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let result: Value = serde_json::from_str(&result).unwrap();
+            let functions = result["functions"].as_array().unwrap();
+            for (i, (name, _, _, expected)) in cases.iter().enumerate() {
+                let prefix = format!("case{i}.");
+                let f = functions
+                    .iter()
+                    .find(|f| f["file"].as_str().is_some_and(|p| p.starts_with(&prefix)))
+                    .unwrap_or_else(|| panic!("{name}: not described"));
+                let got: Vec<&str> = f["blockers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|b| b.starts_with("does I/O") || b.starts_with("not deterministic"))
+                    .collect();
+                assert_eq!(got, *expected, "{name}");
+            }
+        }
+    }
+
     #[test]
     fn maps_typescript() {
         assert_eq!(rust_type("number").as_deref(), Some("f64"));
