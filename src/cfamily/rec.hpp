@@ -16,6 +16,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#ifndef _WIN32
+#include <cerrno>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace fa_rec {
 /*JSON*/
@@ -177,6 +183,65 @@ template <class T, class Al> std::vector<std::vector<T, Al>> variants(const std:
 template <class F, class Tup, size_t... I> auto apply(F &f, Tup &t, std::index_sequence<I...>) -> decltype(f(std::get<I>(t)...)) {
     return f(std::get<I>(t)...);
 }
+// Has the original answer one derived or edge case: run(out) calls it and writes its result as JSON.
+// An input outside the function's domain may crash it or never return, not only throw, so on POSIX
+// it runs in a child process, where a crash or a case still running after 250ms only skips it.
+// False if it didn't answer; took is how long it took.
+template <class Run> bool answer(Run run, std::string &out, long long &took) {
+#ifdef _WIN32
+    try {
+        long long t = now();
+        bool ok = run(out);
+        took = now() - t;
+        return ok;
+    } catch (...) {
+        return false;  // outside the function's domain: not a fair test
+    }
+#else
+    int fd[2];
+    if (pipe(fd)) return false;
+    std::fflush(nullptr);
+    long long t = now();
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(fd[0]);
+        struct itimerval timer = {{0, 0}, {0, 250000}};
+        setitimer(ITIMER_REAL, &timer, nullptr);
+        bool ok = false;
+        std::string r;
+        try {
+            ok = run(r);
+        } catch (...) {
+        }
+        ok = ok && write(fd[1], r.data(), r.size()) == (ssize_t) r.size();
+        _exit(ok ? 0 : 1);
+    }
+    close(fd[1]);
+    if (pid < 0) {
+        close(fd[0]);
+        return false;
+    }
+    out.clear();
+    char chunk[256];
+    ssize_t n;
+    bool read_ok = true;
+    while ((n = read(fd[0], chunk, sizeof chunk)) != 0) {
+        if (n > 0) {
+            out.append(chunk, (size_t) n);
+        } else if (errno != EINTR) {
+            read_ok = false;
+            break;
+        }
+    }
+    close(fd[0]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return false;
+    }
+    took = now() - t;
+    return read_ok && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !out.empty();
+#endif
+}
 template <class Tup, size_t... I> bool encode_tuple(std::string &o, const Tup &t, std::index_sequence<I...>) { return enc_all(o, std::get<I>(t)...); }
 template <size_t I, class F, class Tup, class Seq> void derive_one(F &f, const Tup &args, Seq seq) {
     for (auto &smaller : variants(std::get<I>(args))) {
@@ -186,13 +251,10 @@ template <size_t I, class F, class Tup, class Seq> void derive_one(F &f, const T
         std::string in = "[";
         if (!encode_tuple(in, next_args, seq)) continue;
         in += "]";
-        try {
-            auto r = apply(f, next_args, seq);
-            std::string out;
-            if (enc(out, r)) st().derived.push_back("{\"args\":" + in + ",\"result\":" + out + ",\"derived\":true}");
-        } catch (...) {
-            // outside the function's domain: not a fair test
-        }
+        std::string out;
+        long long took;
+        if (answer([&](std::string &o) { auto r = apply(f, next_args, seq); return enc(o, r); }, out, took))
+            st().derived.push_back("{\"args\":" + in + ",\"result\":" + out + ",\"derived\":true}");
     }
 }
 template <class F, class Tup, class Seq> long long edge_try(F &f, const Tup &next_args, Seq seq) {
@@ -202,19 +264,12 @@ template <class F, class Tup, class Seq> long long edge_try(F &f, const Tup &nex
     auto &s = st();
     if (s.seen[in]) return -1;
     s.seen[in] = true;
-    try {
-        Tup copy = next_args;
-        long long t = now();
-        auto r = apply(f, copy, seq);
-        long long took = now() - t;
-        std::string out;
-        if (!enc(out, r)) return -1;
-        s.derived.push_back("{\"args\":" + in + ",\"result\":" + out + ",\"derived\":\"edge\"}");
-        s.edges++;
-        return took;
-    } catch (...) {
-        return -1;  // outside the function's domain: not a fair test
-    }
+    std::string out;
+    long long took;
+    if (!answer([&](std::string &o) { Tup copy = next_args; auto r = apply(f, copy, seq); return enc(o, r); }, out, took)) return -1;
+    s.derived.push_back("{\"args\":" + in + ",\"result\":" + out + ",\"derived\":\"edge\"}");
+    s.edges++;
+    return took;
 }
 template <size_t I, class F, class Tup, class Seq> void edge_one(F &f, const Tup &args, Seq seq) {
     const Tup base = small_tuple(args, seq);
@@ -230,14 +285,8 @@ template <size_t I, class F, class Tup, class Seq> void edge_one(F &f, const Tup
     // much bigger inputs, only while their time (assumed quadratic) fits the budget
     s.grown[I] = true;
     long long took;
-    try {
-        Tup copy = base;
-        long long t = now();
-        apply(f, copy, seq);
-        took = now() - t;
-    } catch (...) {
-        return;
-    }
+    std::string ignored;
+    if (!answer([&](std::string &o) { Tup copy = base; apply(f, copy, seq); o = "-"; return true; }, ignored, took)) return;
     // 4x bigger each step, from the short version of the input, up to 4096 items
     for (int factor : {4, 16, 64, 256, 512}) {
         if (!edge_ok() || !bigger(std::get<I>(base), factor, big) || took * 16 > edge_left() / 2) return;
