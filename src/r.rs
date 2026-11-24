@@ -531,6 +531,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 - Integer vs double doesn't matter to verify (R prints them alike); names, NA and list structure do. Where R stops with an error, return `Err(message)`.\n\n\
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty vectors, zero, negatives, NA, non-ASCII text, very long input. verify tests these too.\n\
+- Doubles must match within 1e-9 of their size (or of the largest value in the same vector), and zeros keep their sign: -0 is not 0. Keep the same order of float operations.\n\
 - R strings index by character: use `.chars()` (or bytes only after checking `is_ascii()`). R indexes from 1.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases.\n\
 - Keep the function name.\n\n\
@@ -690,7 +691,11 @@ mod tests {
               fa$.fa_same(5L, 5), fa$.fa_same(c(a = 1), c(a = 1 + 1e-12)), !fa$.fa_same(c(a = 1), c(b = 1)),
               fa$.fa_same(NA_real_, NA), fa$.fa_same(NA_character_, NA), !fa$.fa_same(NA, 1),
               fa$.fa_same(Inf, Inf), !fa$.fa_same(Inf, -Inf), fa$.fa_same(character(0), NULL),
-              !fa$.fa_same(list(1), 1), fa$.fa_same(list(c(1L, 2L)), list(c(1, 2))), !fa$.fa_same("a", "b")
+              !fa$.fa_same(list(1), 1), fa$.fa_same(list(c(1L, 2L)), list(c(1, 2))), !fa$.fa_same("a", "b"),
+              !fa$.fa_same(4.2441e-19, 4.2441e-28), !fa$.fa_same(-0, 0), !fa$.fa_same(0L, -0), fa$.fa_same(-0, -0),
+              fa$.fa_same(c(1, 2, 5.551115123125783e-17), c(1, 2, 0)), !fa$.fa_same(list(1, 5.551115123125783e-17), list(1, 0)),
+              fa$.fa_same(1, 1 + 5e-10), !fa$.fa_same(1, 1 + 2e-9), fa$.fa_same(NaN, NaN), !fa$.fa_same(NaN, NA_real_),
+              !fa$.fa_same(c(1e10, 3), c(1e10, 4)), !fa$.fa_same(c(1e308, Inf), c(1e308, 1e308))
             )
         "#;
         let script = bridge.with_extension("check.R");

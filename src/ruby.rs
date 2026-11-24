@@ -236,6 +236,7 @@ Only edit files in this folder. Don't touch the Ruby project.\n\n\
 fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
+- Floats must match within 1e-9 of their size (or of the largest value in the same Array), and zeros keep their sign: -0.0 is not 0.0. Keep the same order of float operations.\n\
 - Change the `serde_json::Value` parameter and return types to concrete ones: they're deserialized for you.\n\
 - Ruby strings index by character: use `.chars()` (or bytes only after checking `is_ascii()`).\n\
 - Ruby Integers don't overflow. `i64` is fine unless the recorded values are bigger. Keep Integer vs Float as Ruby has it.\n\
@@ -522,6 +523,13 @@ mod tests {
             raise "unwire" unless FastAnything.same(back, args)
             raise "lookalike" unless FastAnything.unwire({ "$float" => "nan" }) == { "$float" => "nan" }
             raise "plain" unless JSON.generate(FastAnything.wire([1.0, -0.0])) == "[1.0,-0.0]"
+            raise "tiny" if FastAnything.same(4.2441e-19, 4.2441e-28)
+            raise "zero sign" if FastAnything.same(-0.0, 0.0) || !FastAnything.same(-0.0, -0.0)
+            raise "list scale" unless FastAnything.same([1.0, 2.0, 5.551115123125783e-17], [1.0, 2.0, 0.0])
+            raise "hash scale" if FastAnything.same({ "a" => 1.0, "b" => 5.551115123125783e-17 }, { "a" => 1.0, "b" => 0.0 })
+            raise "1e-9" unless FastAnything.same(1.0, 1.0 + 5e-10) && !FastAnything.same(1.0, 1.0 + 2e-9)
+            raise "ints" if FastAnything.same([10**10, 3], [10**10, 4]) || FastAnything.same(inf, -inf)
+            raise "nan" unless FastAnything.same(nan, nan) && FastAnything.same([10**400, 1.0], [10**400, 1.0])
         "#;
         fs::write(dir.join("check.rb"), check).unwrap();
         let run = Command::new("ruby").arg("check.rb").current_dir(&dir).output().unwrap();

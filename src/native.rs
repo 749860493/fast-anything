@@ -206,6 +206,7 @@ Only edit files in this folder. Don't touch the {label} project.\n\n\
 fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, non-ASCII text, very long input. verify tests these too.\n\
+- Floats must match within 1e-9 of their size (or of the largest value in the same array), and zeros keep their sign: -0.0 is not 0.0. Keep the same order of float operations.\n\
 {rules}\
 - Return `Err(message)` where the original would fail.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases. Threads are fine if the result is the same.\n\
@@ -410,20 +411,25 @@ pub fn replay(job_path: &Path) -> Result<()> {
 
 /// Same value, give or take float rounding.
 pub fn same(a: &Value, b: &Value, loose_empty: bool) -> bool {
+    same_in(a, b, 0.0, loose_empty)
+}
+
+/// `scale`: the largest finite magnitude in the expected array holding `a` (0 outside arrays).
+fn same_in(a: &Value, b: &Value, scale: f64, loose_empty: bool) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => {
             if x.is_f64() || y.is_f64() {
-                let (x, y) = (x.as_f64().unwrap_or(f64::NAN), y.as_f64().unwrap_or(f64::NAN));
-                x == y || (x - y).abs() <= f64::max(1e-12, 1e-9 * x.abs().max(y.abs()))
+                close(x.as_f64().unwrap_or(f64::NAN), y.as_f64().unwrap_or(f64::NAN), scale)
             } else {
                 x == y
             }
         }
         (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q, loose_empty))
+            let scale = x.iter().filter_map(Value::as_f64).filter(|v| v.is_finite()).fold(0.0, |m, v| v.abs().max(m));
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_in(p, q, scale, loose_empty))
         }
         (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, p)| y.get(k).is_some_and(|q| same(p, q, loose_empty)))
+            x.len() == y.len() && x.iter().all(|(k, p)| y.get(k).is_some_and(|q| same_in(p, q, 0.0, loose_empty)))
         }
         (Value::Null, Value::Array(v)) | (Value::Array(v), Value::Null) => loose_empty && v.is_empty(),
         (Value::Null, Value::Object(v)) | (Value::Object(v), Value::Null) => loose_empty && v.is_empty(),
@@ -432,6 +438,17 @@ pub fn same(a: &Value, b: &Value, loose_empty: bool) -> bool {
         }
         _ => a == b,
     }
+}
+
+/// Floats within 1e-9 of their size (or of `scale`). -0.0 isn't 0.0: it prints differently.
+fn close(x: f64, y: f64, scale: f64) -> bool {
+    if x.is_nan() || y.is_nan() {
+        return x.is_nan() && y.is_nan();
+    }
+    if x == y {
+        return x.is_sign_negative() == y.is_sign_negative();
+    }
+    x.is_finite() && y.is_finite() && (x - y).abs() <= 1e-9 * x.abs().max(y.abs()).max(scale)
 }
 
 // ------------------------------------------------------------------ temporary edits
@@ -627,6 +644,22 @@ mod tests {
         assert!(same(&j("null"), &j("[]"), true) && !same(&j("null"), &j("[]"), false));
         assert!(same(&j("{\"a\": [1]}"), &j("{\"a\": [1]}"), false));
         assert!(same(&j("3"), &j("3.0"), false));
+    }
+
+    #[test]
+    fn floats_match_to_their_size_or_their_lists() {
+        let j = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+        assert!(!same(&j("4.2441e-19"), &j("4.2441e-28"), false));
+        assert!(!same(&j("-0.0"), &j("0.0"), false) && !same(&j("-0"), &j("0.0"), false));
+        assert!(same(&j("-0.0"), &j("-0"), false) && same(&j("[0.0]"), &j("[0]"), false));
+        assert!(same(&j("[1.0, 2.0, 5.551115123125783e-17]"), &j("[1.0, 2.0, 0.0]"), false));
+        assert!(!same(&j("{\"a\": 1.0, \"b\": 5.551115123125783e-17}"), &j("{\"a\": 1.0, \"b\": 0.0}"), false));
+        assert!(!same(&j("[5.551115123125783e-17, [1.0]]"), &j("[0.0, [1.0]]"), false));
+        assert!(same(&j("1.0"), &j("1.0000000005"), false) && !same(&j("1.0"), &j("1.000000002"), false));
+        assert!(!same(&j("[1e10, 3]"), &j("[1e10, 4]"), false));
+        assert!(close(f64::NAN, f64::NAN, 0.0) && !close(f64::NAN, 1.0, 0.0));
+        assert!(close(f64::INFINITY, f64::INFINITY, 1.0) && !close(f64::INFINITY, f64::NEG_INFINITY, 1.0));
+        assert!(!close(f64::INFINITY, f64::MAX, f64::MAX));
     }
 
     #[test]

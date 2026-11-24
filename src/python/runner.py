@@ -154,8 +154,9 @@ def dec(v):
     return v
 
 
-def same(a, b):
-    """Equality the way a caller would see it: floats within 1e-9, but 3 != 3.0 (it prints
+def same(a, b, scale=0.0):
+    """Equality the way a caller would see it: floats within 1e-9 of their size (or of `scale`, the
+    largest number in the expected list holding them), but -0.0 != 0.0 and 3 != 3.0 (they print
     differently) and a list isn't a tuple (it can't be hashed)."""
     np = sys.modules.get("numpy")
     if np is not None:
@@ -163,7 +164,7 @@ def same(a, b):
             if not (isinstance(a, np.ndarray) and isinstance(b, np.ndarray)) or a.shape != b.shape or a.dtype != b.dtype:
                 return False
             if a.dtype.kind == "f":
-                return bool(np.allclose(a, b, rtol=1e-9, atol=1e-12, equal_nan=True))
+                return same_floats(np, a, b)
             return bool(np.array_equal(a, b))
         # a NumPy scalar compares like the Python number it holds (a.sum() vs a port's f64)
         a = a.item() if isinstance(a, np.generic) else a
@@ -178,14 +179,41 @@ def same(a, b):
             return False
         if math.isnan(a) or math.isnan(b):
             return math.isnan(a) and math.isnan(b)
-        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+        if a == b:
+            return math.copysign(1.0, a) == math.copysign(1.0, b)
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9 * scale)
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         if isinstance(a, tuple) != isinstance(b, tuple):
             return False
-        return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+        scale = largest(a)
+        return len(a) == len(b) and all(same(x, y, scale) for x, y in zip(a, b))
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(same(a[k], b[k]) for k in a)
     return a == b
+
+
+def largest(xs):
+    """The largest finite magnitude among the numbers in a list (0.0 if there are none)."""
+    big = 0.0
+    for x in xs:
+        if isinstance(x, (int, float)) and not isinstance(x, bool) and big < abs(x) < math.inf:
+            big = abs(x)
+    return float(min(big, sys.float_info.max))
+
+
+def same_floats(np, a, b):
+    """Float arrays element by element like same(), all within 1e-9 of the largest expected one."""
+    nan = np.isnan(a)
+    if not np.array_equal(nan, np.isnan(b)):
+        return False
+    finite = np.isfinite(a) & np.isfinite(b)
+    infinite = ~finite & ~nan
+    if not np.array_equal(a[infinite], b[infinite]) or np.any((a == b) & (np.signbit(a) != np.signbit(b))):
+        return False
+    x, y = a[finite], b[finite]
+    scale = np.abs(a[np.isfinite(a)]).max(initial=0.0)
+    with np.errstate(over="ignore"):
+        return bool(np.all((x == y) | (np.abs(x - y) <= 1e-9 * np.maximum(np.maximum(np.abs(x), np.abs(y)), scale))))
 
 
 def show(v, limit=160):

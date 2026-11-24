@@ -461,7 +461,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 - JavaScript strings are UTF-16: `.length`, indexing and `charCodeAt` count UTF-16 code units. \
 Use `s.encode_utf16()` for anything index- or length-based (bytes are fine after checking `is_ascii()`).\n\
 - JavaScript numbers are f64. Integer math is exact only up to 2^53; use `f64` unless the values are clearly small integers.\n\
-- Results are compared with a relative tolerance of 1e-9. Keep the same order of float operations.\n\
+- Numbers must match within 1e-9 of their size (or of the largest value in the same array), and zeros keep their sign: -0 is not 0. Keep the same order of float operations.\n\
 - Where JavaScript throws, return `Err(Error::from_reason(...))`.\n\
 - Each call crosses from JavaScript into Rust: keep conversions cheap, don't clone big inputs.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases.\n\
@@ -1013,6 +1013,39 @@ for (const worst of [
   const res = codeOnly(worst);
   assert.equal(res, worst);
 }
+"#,
+        )
+        .unwrap();
+        let out = Command::new("node").arg("check.mjs").current_dir(&dir).output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", combined(&out));
+    }
+
+    #[test]
+    fn numbers_match_to_their_size_or_their_arrays() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-node-same-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let stripped = RUNNER.split("const [mode, jobPath]").next().unwrap();
+        fs::write(dir.join("lib.mjs"), format!("{stripped}\nexport {{ same }};\n")).unwrap();
+        fs::write(
+            dir.join("check.mjs"),
+            r#"import assert from "node:assert/strict";
+import { same } from "./lib.mjs";
+
+assert.ok(!same(4.2441e-19, 4.2441e-28));
+assert.ok(!same(-0, 0) && !same(0, -0) && same(-0, -0) && same(0, 0));
+assert.ok(same([1.0, 2.0, 5.551115123125783e-17], [1.0, 2.0, 0.0]));
+assert.ok(same(new Float64Array([1, 5.551115123125783e-17]), new Float64Array([1, 0])));
+assert.ok(!same({ a: 1, b: 5.551115123125783e-17 }, { a: 1, b: 0 }));
+assert.ok(!same([1e10, 3], [1e10, 4]));
+assert.ok(same(1.0, 1.0 + 5e-10) && !same(1.0, 1.0 + 2e-9));
+assert.ok(same(NaN, NaN) && !same(NaN, 0) && same(Infinity, Infinity) && !same(Infinity, -Infinity));
+assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALUE]));
 "#,
         )
         .unwrap();
