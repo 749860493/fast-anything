@@ -150,7 +150,9 @@ fn run_php(
 ) -> Result<std::process::Output> {
     let mut cmd = Command::new(php);
     cmd.arg("-d")
-        .arg(format!("auto_prepend_file={}", prepend.display()))
+        // quoted, as an ini value: a path can hold characters ini syntax reads as operators (~ in
+        // Windows short names, like C:\Users\RUNNER~1)
+        .arg(format!("auto_prepend_file=\"{}\"", prepend.display()))
         .args(args)
         .current_dir(&ctx.root)
         .env(DISABLE_ENV, "1")
