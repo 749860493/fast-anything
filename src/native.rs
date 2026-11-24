@@ -30,6 +30,8 @@ pub struct Flavor {
     pub default_json: fn(&str) -> Option<String>,
     /// Language-specific rules for TASK.md.
     pub rules: &'static [&'static str],
+    /// How NaN and infinity travel (see glue_rs), if the language's bridge and recorder carry them.
+    pub floats: Option<[&'static str; 4]>,
 }
 
 // ------------------------------------------------------------------ the crate
@@ -45,7 +47,17 @@ pub fn snake(name: &str) -> String {
     }
 }
 
-pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<String>) -> String {
+/// How NaN and infinity travel in the JSON: the tag, then the names for NaN, +inf and -inf.
+pub const FLOATS: [&str; 4] = ["$float", "NaN", "Infinity", "-Infinity"];
+
+/// The crate's C entry point. With floats, NaN and infinity travel tagged (see native/wire.rs);
+/// without, they can't be passed in, and a NaN or infinite result comes out as null.
+pub fn glue_rs(
+    hs: &Hotspot,
+    port: &Port,
+    default_json: fn(&str) -> Option<String>,
+    floats: Option<[&str; 4]>,
+) -> String {
     let args: Vec<String> = hs
         .params
         .iter()
@@ -62,7 +74,7 @@ pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<Strin
          use serde_json::{{Value, json}};\n\n\
          fn arg<T: serde::de::DeserializeOwned>(args: &[Value], i: usize, default: Option<&str>) -> Result<T, String> {{\n    \
              match args.get(i) {{\n        \
-                 Some(v) => T::deserialize(v).map_err(|e| format!(\"argument {{}}: {{e}}\", i + 1)),\n        \
+                 Some(v) => T::deserialize({read}).map_err(|e| format!(\"argument {{}}: {{e}}\", i + 1)),\n        \
                  None => match default {{\n            \
                      Some(d) => serde_json::from_str(d).map_err(|e| e.to_string()),\n            \
                      None => Err(format!(\"missing argument {{}}\", i + 1)),\n        \
@@ -72,7 +84,7 @@ pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<Strin
          fn call(input: &[u8]) -> Result<Value, String> {{\n    \
              let args: Vec<Value> = serde_json::from_slice(input).map_err(|e| e.to_string())?;\n    \
              let result = port::{func}({args})?;\n    \
-             serde_json::to_value(result).map_err(|e| e.to_string())\n\
+             serde_json::to_value({write}).map_err(|e| e.to_string())\n\
          }}\n\n\
          /// # Safety\n\
          /// input must point to len readable bytes and out_len to a writable usize.\n\
@@ -101,8 +113,13 @@ pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<Strin
          }}\n",
         func = snake(&hs.name),
         args = args.join(", "),
-    ) + &format!("\n// {}\n", port.id)
+        read = if floats.is_some() { "WireIn(v)" } else { "v" },
+        write = if floats.is_some() { "WireOut(&result)" } else { "result" },
+    ) + &floats.map(|f| format!("\nconst FLOATS: [&str; 4] = {f:?};\n\n{WIRE_RS}")).unwrap_or_default()
+        + &format!("\n// {}\n", port.id)
 }
+
+const WIRE_RS: &str = include_str!("native/wire.rs");
 
 pub fn cargo_toml(port: &Port) -> String {
     format!(
@@ -214,7 +231,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port, f: &F
     fs::create_dir_all(dir.join(".cargo"))?;
     fs::write(dir.join("Cargo.toml"), cargo_toml(port))?;
     fs::write(dir.join(".cargo/config.toml"), backend::CARGO_CONFIG)?;
-    fs::write(dir.join("src/lib.rs"), glue_rs(hs, port, f.default_json))?;
+    fs::write(dir.join("src/lib.rs"), glue_rs(hs, port, f.default_json, f.floats))?;
     let body = dir.join("src/port.rs");
     if !body.exists() {
         fs::write(&body, port_rs(hs, port, f))?;
@@ -610,5 +627,118 @@ mod tests {
         assert!(same(&j("null"), &j("[]"), true) && !same(&j("null"), &j("[]"), false));
         assert!(same(&j("{\"a\": [1]}"), &j("{\"a\": [1]}"), false));
         assert!(same(&j("3"), &j("3.0"), false));
+    }
+
+    #[test]
+    fn only_languages_that_read_tagged_floats_get_them() {
+        let hs = Hotspot { name: "mean".into(), params: vec![Default::default()], ..Hotspot::default() };
+        let port = Port {
+            id: "m.mean".into(),
+            file: "m.rb".into(),
+            module: "m".into(),
+            func: "mean".into(),
+            ext: "fa_m_mean".into(),
+            crate_dir: ".fast/ports/m.mean".into(),
+            recorded: 0,
+            calls_seen: 0,
+            verify: None,
+            enabled: false,
+            lang: Lang::Ruby,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        let plain = glue_rs(&hs, &port, |_| None, None);
+        assert!(plain.contains("T::deserialize(v)") && plain.contains("serde_json::to_value(result)"));
+        assert!(!plain.contains("Wire") && !plain.contains("FLOATS"));
+        let tagged = glue_rs(&hs, &port, |_| None, Some(FLOATS));
+        assert!(
+            tagged.contains("T::deserialize(WireIn(v))") && tagged.contains("serde_json::to_value(WireOut(&result))")
+        );
+        assert!(tagged.contains("const FLOATS: [&str; 4] = [\"$float\", \"NaN\", \"Infinity\", \"-Infinity\"];"));
+    }
+
+    /// The wire code generated into every port, compiled here as it is there.
+    mod wire {
+        const FLOATS: [&str; 4] = super::super::FLOATS;
+        include!("native/wire.rs");
+
+        use serde_json::{Value, json};
+        use std::collections::{BTreeMap, HashMap};
+
+        fn read<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, serde_json::Error> {
+            T::deserialize(WireIn(&v))
+        }
+
+        fn write<T: Serialize>(v: T) -> Value {
+            serde_json::to_value(WireOut(&v)).unwrap()
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize, Debug, PartialEq)]
+        struct Point {
+            x: f64,
+            label: Option<String>,
+        }
+
+        #[test]
+        fn nan_and_infinity_reach_plain_floats() {
+            let xs: Vec<f64> =
+                read(json!([1.5, {"$float": "NaN"}, {"$float": "Infinity"}, {"$float": "-Infinity"}, -0.0])).unwrap();
+            assert_eq!(xs[0], 1.5);
+            assert!(xs[1].is_nan() && xs[2] == f64::INFINITY && xs[3] == f64::NEG_INFINITY);
+            assert!(xs[4] == 0.0 && xs[4].is_sign_negative());
+            let x: f32 = read(json!({"$float": "-Infinity"})).unwrap();
+            assert_eq!(x, f32::NEG_INFINITY);
+            let m: HashMap<String, Vec<f64>> = read(json!({"a": [{"$float": "NaN"}]})).unwrap();
+            assert!(m["a"][0].is_nan());
+            let o: (Option<f64>, Option<f64>) = read(json!([null, {"$float": "Infinity"}])).unwrap();
+            assert_eq!(o, (None, Some(f64::INFINITY)));
+            let p: Point = read(json!({"x": {"$float": "NaN"}, "label": "a"})).unwrap();
+            assert!(p.x.is_nan() && p.label.as_deref() == Some("a"));
+            // untagged enums (R's Vector) see the value through deserialize_any
+            #[derive(serde::Deserialize)]
+            #[serde(untagged)]
+            enum OneOrMany {
+                Many(Vec<Option<f64>>),
+                One(f64),
+            }
+            let Ok(OneOrMany::Many(v)) = read(json!([{"$float": "-Infinity"}, null])) else { panic!() };
+            assert_eq!(v, [Some(f64::NEG_INFINITY), None]);
+            let Ok(OneOrMany::One(x)) = read(json!({"$float": "NaN"})) else { panic!() };
+            assert!(x.is_nan());
+        }
+
+        #[test]
+        fn everything_else_reads_as_serde_json_reads_it() {
+            // a map that looks like a tag is only a float where the port takes one
+            let m: HashMap<String, String> = read(json!({"$float": "NaN"})).unwrap();
+            assert_eq!(m["$float"], "NaN");
+            let s: Point = read(json!({"x": 1.0, "label": "$float"})).unwrap();
+            assert_eq!(s, Point { x: 1.0, label: Some("$float".into()) });
+            let keys: BTreeMap<u32, i64> = read(json!({"7": 1, "12": -2})).unwrap();
+            assert_eq!(keys, BTreeMap::from([(7, 1), (12, -2)]));
+            let t: (i64, String, bool, Vec<u8>) = read(json!([3, "é", true, [1, 2]])).unwrap();
+            assert_eq!(t, (3, "é".to_string(), true, vec![1, 2]));
+            assert!(read::<f64>(json!({"$float": "nan"})).is_err());
+            assert!(read::<f64>(json!({"$float": "NaN", "x": 1})).is_err());
+            assert!(read::<i64>(json!(1.5)).is_err());
+            assert!(read::<Vec<f64>>(json!("x")).is_err());
+        }
+
+        #[test]
+        fn nan_and_infinity_come_back_tagged() {
+            assert_eq!(
+                write(vec![1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY]),
+                json!([1.5, {"$float": "NaN"}, {"$float": "Infinity"}, {"$float": "-Infinity"}])
+            );
+            assert_eq!(write(f32::NAN), json!({"$float": "NaN"}));
+            assert_eq!(write(Some(f64::INFINITY)), json!({"$float": "Infinity"}));
+            assert_eq!(write(None::<f64>), json!(null));
+            assert_eq!(write(BTreeMap::from([("a", f64::NAN)])), json!({"a": {"$float": "NaN"}}));
+            assert_eq!(write((1, f64::NEG_INFINITY)), json!([1, {"$float": "-Infinity"}]));
+            assert_eq!(write(Point { x: f64::NAN, label: None }), json!({"x": {"$float": "NaN"}, "label": null}));
+            assert_eq!(write((7_i64, 2.5_f64, "s", true)), json!([7, 2.5, "s", true]));
+            assert_eq!(serde_json::to_string(&write(-0.0_f64)).unwrap(), "-0.0");
+        }
     }
 }

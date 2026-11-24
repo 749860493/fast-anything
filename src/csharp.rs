@@ -650,6 +650,7 @@ pub const FLAVOR: Flavor = Flavor {
         "`ToLowerInvariant` maps one UTF-16 unit at a time; Rust's `to_lowercase` can differ on a few characters (İ, final sigma). `Split((char[]?)null)` splits on Unicode whitespace, like `split_whitespace`.",
         "Arrays and lists arrive as JSON arrays, dictionaries as objects with string keys.",
     ],
+    floats: None,
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {

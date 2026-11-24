@@ -219,7 +219,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
     fs::create_dir_all(dir.join(".cargo"))?;
     fs::write(dir.join("Cargo.toml"), cargo_toml(port))?;
     fs::write(dir.join(".cargo/config.toml"), backend::CARGO_CONFIG)?;
-    fs::write(dir.join("src/lib.rs"), crate::native::glue_rs(hs, port, default_json))?;
+    fs::write(dir.join("src/lib.rs"), crate::native::glue_rs(hs, port, default_json, Some(crate::native::FLOATS)))?;
     let body = dir.join("src/port.rs");
     if !body.exists() {
         fs::write(&body, port_rs(hs, port))?;
@@ -259,12 +259,35 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
         format!("    -> {{\n      lib = Fiddle.dlopen(File.expand_path(\"{lib_rel}\", __dir__))"),
         "      call = Fiddle::Function.new(lib[\"fa_call\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)".to_string(),
         "      free = Fiddle::Function.new(lib[\"fa_free\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T], Fiddle::TYPE_VOID)".to_string(),
+        "      # NaN and infinity, which JSON has no numbers for, travel as {\"$float\" => name}".to_string(),
+        "      floats = { \"NaN\" => Float::NAN, \"Infinity\" => Float::INFINITY, \"-Infinity\" => -Float::INFINITY }".to_string(),
+        "      wire = lambda do |v|".to_string(),
+        "        case v".to_string(),
+        "        when Float then v.finite? ? v : { \"$float\" => v.to_s }".to_string(),
+        "        when Array then v.map(&wire)".to_string(),
+        "        when Hash then v.transform_values(&wire)".to_string(),
+        "        else v".to_string(),
+        "        end".to_string(),
+        "      end".to_string(),
+        "      unwire = lambda do |v|".to_string(),
+        "        case v".to_string(),
+        "        when Array then v.map(&unwire)".to_string(),
+        "        when Hash then v.size == 1 && floats.key?(v[\"$float\"]) ? floats[v[\"$float\"]] : v.transform_values(&unwire)".to_string(),
+        "        else v".to_string(),
+        "        end".to_string(),
+        "      end".to_string(),
         format!("      {owner}.send(:define_method, :{name}) do |*args|"),
-        "        input = JSON.generate(args)".to_string(),
+        "        input = begin".to_string(),
+        "          JSON.generate(args)".to_string(),
+        "        rescue JSON::GeneratorError".to_string(),
+        "          JSON.generate(wire.(args))".to_string(),
+        "        end".to_string(),
         "        size = Fiddle::Pointer.malloc(Fiddle::SIZEOF_SIZE_T, Fiddle::RUBY_FREE)".to_string(),
         "        out = call.call(input, input.bytesize, size)".to_string(),
         "        len = size[0, Fiddle::SIZEOF_SIZE_T].unpack1(\"J\")".to_string(),
-        "        reply = JSON.parse(out[0, len].force_encoding(Encoding::UTF_8))".to_string(),
+        "        text = out[0, len].force_encoding(Encoding::UTF_8)".to_string(),
+        "        reply = JSON.parse(text)".to_string(),
+        "        reply = unwire.(reply) if text.include?('\"$float\"')".to_string(),
         "        free.call(out, len)".to_string(),
         "        raise reply[\"error\"] if reply.key?(\"error\")".to_string(),
         "        reply[\"ok\"]".to_string(),
@@ -316,5 +339,51 @@ mod tests {
         assert_eq!(default_json("[]").as_deref(), Some("[]"));
         assert_eq!(default_json("SOME_CONST"), None);
         assert!(is_ruby("ruby") && is_ruby("C:\\Ruby40-x64\\bin\\ruby.exe") && !is_ruby("rubocop"));
+    }
+
+    #[test]
+    fn nan_and_infinity_cross_the_bridge_tagged() {
+        if !Command::new("ruby").arg("-v").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no ruby on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-ruby-wire-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("recorder.rb"), RECORDER).unwrap();
+        let port = Port {
+            id: "app.rb.mean".into(),
+            file: "app.rb".into(),
+            module: "app".into(),
+            func: "mean".into(),
+            ext: "fa_app_rb_mean".into(),
+            crate_dir: ".fast/ports/app.rb.mean".into(),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: backend::Lang::Ruby,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        fs::write(dir.join("shim.rb"), shim(&port, "../.fast/lib/libfa_app_rb_mean.so")).unwrap();
+        let check = r#"
+            require_relative "recorder"
+            nan, inf = Float::NAN, Float::INFINITY
+            args = [[1.5, nan, -inf], { "a" => inf, "$float" => "NaN" }, "NaN", 2]
+            wired = FastAnything.wire(args)
+            raise "wire" unless wired == [[1.5, { "$float" => "NaN" }, { "$float" => "-Infinity" }],
+                                          { "a" => { "$float" => "Infinity" }, "$float" => "NaN" }, "NaN", 2]
+            back = FastAnything.unwire(JSON.parse(JSON.generate(wired)))
+            raise "unwire" unless FastAnything.same(back, args)
+            raise "lookalike" unless FastAnything.unwire({ "$float" => "nan" }) == { "$float" => "nan" }
+            raise "plain" unless JSON.generate(FastAnything.wire([1.0, -0.0])) == "[1.0,-0.0]"
+        "#;
+        fs::write(dir.join("check.rb"), check).unwrap();
+        let run = Command::new("ruby").arg("check.rb").current_dir(&dir).output().unwrap();
+        let syntax = Command::new("ruby").args(["-c", "shim.rb"]).current_dir(&dir).output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert!(syntax.status.success(), "{}", String::from_utf8_lossy(&syntax.stderr));
     }
 }

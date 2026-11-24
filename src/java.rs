@@ -478,6 +478,7 @@ pub const FLAVOR: Flavor = Flavor {
         "`/` and `%` on integers truncate toward zero, as in Rust. `Math.round` rounds half up: `(x + 0.5).floor()`.",
         "Arrays and Lists arrive as JSON arrays, Maps as objects with String keys.",
     ],
+    floats: None,
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {

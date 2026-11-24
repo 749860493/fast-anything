@@ -1089,6 +1089,7 @@ pub const FLAVOR_C: Flavor = Flavor {
         "Floats: compilers may fuse `a * b + c` into one FMA instruction (clang does on ARM), which rounds differently. If recorded results differ in the last digits, the original was built that way: use `f64::mul_add` there, or build the app with `-ffp-contract=off`.",
         "Returns are numbers or bools. Undefined behavior in the original (overflow of signed ints, out-of-bounds reads) isn't a spec: match the defined cases.",
     ],
+    floats: None,
 };
 
 pub const FLAVOR_CPP: Flavor = Flavor {
@@ -1102,6 +1103,7 @@ pub const FLAVOR_CPP: Flavor = Flavor {
         "`std::vector` is Vec, `std::array<T, N>` is `[T; N]`, `std::map<std::string, T>` is BTreeMap (same key order), `std::pair` is a tuple.",
         "Return `Err(message)` where the original throws.",
     ],
+    floats: None,
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {

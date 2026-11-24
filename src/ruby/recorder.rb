@@ -7,6 +7,8 @@ require "json"
 module FastAnything
   class Unsupported < StandardError; end
 
+  FLOATS = { "NaN" => Float::NAN, "Infinity" => Float::INFINITY, "-Infinity" => -Float::INFINITY }.freeze
+
   module_function
 
   def enc(v)
@@ -34,10 +36,29 @@ module FastAnything
     when Hash
       tag, x = v.first
       case tag
-      when "$float" then { "NaN" => Float::NAN, "Infinity" => Float::INFINITY, "-Infinity" => -Float::INFINITY }.fetch(x)
+      when "$float" then FLOATS.fetch(x)
       when "$hash" then x.to_h { |k, e| [k, dec(e)] }
       else raise "unknown tag #{tag}"
       end
+    else v
+    end
+  end
+
+  # Arguments for a port's C bridge, where NaN and infinity, which JSON has no numbers for, travel
+  # as {"$float": name}. The port's reply comes back the same way.
+  def wire(v)
+    case v
+    when Float then v.finite? ? v : { "$float" => v.to_s }
+    when Array then v.map { |x| wire(x) }
+    when Hash then v.transform_values { |x| wire(x) }
+    else v
+    end
+  end
+
+  def unwire(v)
+    case v
+    when Array then v.map { |x| unwire(x) }
+    when Hash then v.size == 1 && FLOATS.key?(v["$float"]) ? FLOATS[v["$float"]] : v.transform_values { |x| unwire(x) }
     else v
     end
   end
