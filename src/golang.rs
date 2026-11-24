@@ -231,7 +231,12 @@ fn instrument(
         })
         .context("no func main() in the main package")?;
     let mut patches = Patches::new(ctx)?;
-    let text = fs::read_to_string(&main.path)?;
+    // the function being recorded can live next to main(): hook the text it was patched into
+    let mut extra = extra;
+    let text = match extra.iter().position(|(p, _)| *p == main.path) {
+        Some(i) => extra.remove(i).1,
+        None => fs::read_to_string(&main.path)?,
+    };
     let hooked =
         native::insert_in_body(&text, "//", "hooks", "defer fastAnythingDone()", find_body("main", main.line))?;
     let hooks = main_dir.join("fast_anything_hooks.go");
@@ -516,6 +521,38 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn records_a_function_that_lives_next_to_main() {
+        if !Command::new("go").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no go on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-go-main-file-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), "module demo\n\ngo 1.22\n").unwrap();
+        let main = "package main\n\nimport \"fmt\"\n\nfunc double(x int) int {\n\treturn 2 * x\n}\n\nfunc main() {\n\tt := 0\n\tfor i := 0; i < 7; i++ {\n\t\tt += double(i)\n\t}\n\tfmt.Println(t)\n}\n";
+        fs::write(dir.join("main.go"), main).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let hs = Hotspot {
+            id: "main.double".into(),
+            file: "main.go".into(),
+            line: 5,
+            name: "double".into(),
+            qualname: "double".into(),
+            params: vec![Param { name: "x".into(), annotation: Some("int".into()), ..Param::default() }],
+            returns: Some("int".into()),
+            ..Hotspot::default()
+        };
+        let out = dir.join("rec.jsonl");
+        let rec = record(&ctx, "go", &["run".into(), ".".into()], &hs, &out, 50);
+        let after = fs::read_to_string(dir.join("main.go")).unwrap();
+        let lines = fs::read_to_string(&out).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(rec.unwrap().calls, 7);
+        assert!(lines.contains("{\"args\":[3],\"result\":6}"), "{lines}");
+        assert_eq!(after, main, "the app is left as it was");
+    }
 
     #[test]
     fn go_commands_and_profiles() {
