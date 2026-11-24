@@ -207,13 +207,18 @@ def bridge(path)
   call = Fiddle::Function.new(lib["fa_call"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)
   free = Fiddle::Function.new(lib["fa_free"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T], Fiddle::TYPE_VOID)
   lambda do |*args|
-    input = JSON.generate(args)
+    input = begin
+      JSON.generate(args)
+    rescue JSON::GeneratorError # NaN or infinity
+      JSON.generate(FastAnything.wire(args))
+    end
     size = Fiddle::Pointer.malloc(Fiddle::SIZEOF_SIZE_T, Fiddle::RUBY_FREE)
     out = call.call(input, input.bytesize, size)
     len = size[0, Fiddle::SIZEOF_SIZE_T].unpack1("J")
     text = out[0, len].force_encoding(Encoding::UTF_8)
     free.call(out, len)
     reply = JSON.parse(text)
+    reply = FastAnything.unwire(reply) if text.include?('"$float"')
     raise reply["error"] if reply.key?("error")
 
     reply["ok"]
