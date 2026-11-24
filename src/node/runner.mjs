@@ -11,6 +11,17 @@ const IO =
   /\b(console|fs|process|fetch|require|XMLHttpRequest|document|window|localStorage|sessionStorage|setTimeout|setInterval|setImmediate|queueMicrotask|Bun|Deno)\b|\bimport\s*\(/g;
 const NONDET = /\bMath\.random\b|\bDate\.now\b|\bnew\s+Date\b|\bperformance\.now\b|\bcrypto\.\w+/g;
 const IDENT = "[A-Za-z_$][\\w$]*";
+// Built-in modules whose functions do I/O (or read the machine and the process) wherever they're reached
+// from, and the members that don't: constants and pure helpers like `net.isIP`.
+const IO_MODULES = new Set(["fs", "child_process", "net", "http", "https", "http2", "dgram", "dns", "tls", "readline",
+  "process", "os", "worker_threads", "cluster", "inspector", "timers", "tty", "repl", "module", "console", "sqlite",
+  "wasi", "v8"]);
+const IO_PURE = new Set(["fs.constants", "os.EOL", "os.constants", "os.devNull", "net.isIP", "net.isIPv4", "net.isIPv6",
+  "http.STATUS_CODES", "http.METHODS", "module.isBuiltin", "module.builtinModules", "module.stripTypeScriptTypes"]);
+// crypto's hashes and ciphers give the same answer every time; its random and key generators, and the
+// signatures and encryption that pad or salt at random, don't.
+const NONDET_CRYPTO =
+  /^(random\w*|pseudoRandom\w*|getRandomValues|generateKey\w*|generatePrime\w*|webcrypto|subtle|createECDH|createDiffieHellman\w*|getDiffieHellman|createSign|sign|publicEncrypt)$/;
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ------------------------------------------------------------------ source scanning
@@ -107,20 +118,356 @@ function topLevelFunctions(src) {
   return new Set([...src.matchAll(re)].map((m) => m[1] || m[2]));
 }
 
+/** What a built-in module's member is: "io", "nondet" or null. `member` is null for the module itself
+ *  (destructured, indexed or passed along), which counts as what the module does. */
+function builtin(mod, member) {
+  const base = mod.replace(/^node:/, "").split("/")[0];
+  if (IO_MODULES.has(base)) return member && IO_PURE.has(base + "." + member) ? null : "io";
+  if (base === "perf_hooks") return "nondet";
+  if (base === "crypto" && (!member || NONDET_CRYPTO.test(member))) return "nondet";
+  return null;
+}
+
+/** splitTop, without taking an arrow's `>` or a spaced comparison (`a < b`, `x >= 1`) for a bracket. */
+const topParts = (s) => splitTop(s.replace(/=>|\s[<>]=?\s|[<>]=/g, (m) => " ".repeat(m.length)));
+
+/** Where a parameter's or declarator's default starts, or -1. */
+const defaultOf = (p) => defaultAt(p.replace(/=>|\s[<>]=?\s|[<>]=/g, (m) => " ".repeat(m.length)));
+
+/** The names a parameter or a declarator binds: `x`, `x = 1`, `...x`, `x: T`, `{ a, b: c, d = 1 }`, `[a, [b]]`. */
+function bindingNames(p) {
+  p = p.trim();
+  const eq = defaultOf(p);
+  if (eq >= 0) p = p.slice(0, eq).trim();
+  if (p.startsWith("...")) p = p.slice(3).trim();
+  if (p[0] === "{" || p[0] === "[") {
+    const end = matching(p, 0);
+    return topParts(p.slice(1, end < 0 ? p.length : end)).flatMap((part) => {
+      if (p[0] === "[") return bindingNames(part);
+      const d = defaultOf(part);
+      const colon = colonAt(d < 0 ? part : part.slice(0, d));
+      return bindingNames(colon >= 0 ? part.slice(colon + 1) : part);
+    });
+  }
+  const id = p.match(/^[A-Za-z_$][\w$]*/);
+  return id ? [id[0]] : [];
+}
+
+/** Where `key: value` splits in an object pattern part: the first `:` outside brackets. */
+function colonAt(s) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    if ("([{".includes(s[i])) depth++;
+    else if (")]}".includes(s[i])) depth--;
+    else if (s[i] === ":" && depth === 0) return i;
+  }
+  return -1;
+}
+
+/** The bracket that opens the one closing at `close`, looking back. */
+function openOf(code, close) {
+  const open = { ")": "(", "}": "{", "]": "[" }[code[close]];
+  let depth = 0;
+  for (let i = close; i >= 0; i--) {
+    if (code[i] === code[close]) depth++;
+    else if (code[i] === open && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** The last `n` characters of `s` before `at`, without trailing space: enough to see what comes just before. */
+const tail = (s, at, n = 80) => s.slice(Math.max(0, at - n), at).trimEnd();
+
+/** The `{` of the innermost block around `at`, or -1. */
+function openAround(body, at) {
+  let depth = 0;
+  for (let i = at - 1; i >= 0; i--) {
+    if (body[i] === "}") depth++;
+    else if (body[i] === "{" && depth-- === 0) return i;
+  }
+  return -1;
+}
+
+/** [start, end) of a block opening at `open`, or the whole body when there's none. */
+function blockAt(body, open) {
+  if (open < 0) return [0, body.length];
+  const end = matching(body, open);
+  return [open, end < 0 ? body.length : end + 1];
+}
+
+/** Whether the block opening at `open` is a function's body: after `) {`, `): T {` or `=> {` that isn't
+ *  an if/for/while/switch/catch/with header. */
+function isFunctionBody(body, open) {
+  const before = tail(body, open, 200);
+  if (before.endsWith("=>")) return true;
+  const m = before.match(/\)\s*(?::[^(){};=]*)?$/);
+  if (!m) return false;
+  const paren = openOf(body, trimmedEnd(body, open) - m[0].length);
+  return paren >= 0 && !/\b(?:if|for|while|switch|catch|with)$/.test(tail(body, paren, 20));
+}
+
+/** The index just past the last non-space character before `at`. */
+function trimmedEnd(s, at) {
+  while (at > 0 && /\s/.test(s[at - 1])) at--;
+  return at;
+}
+
+/** Where an expression that starts at `from` ends: a `,` `;` `:` or closing bracket outside brackets, or the
+ *  end of its line unless the next line goes on with it. A ternary's own `:` doesn't end it. */
+function expressionEnd(body, from) {
+  let depth = 0;
+  let ternary = 0;
+  let last = "";
+  for (let i = from; i < body.length; i++) {
+    const c = body[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c) && --depth < 0) return i;
+    else if (depth === 0 && c === "?" && body[i + 1] !== "." && body[i + 1] !== "?" && body[i - 1] !== "?") ternary++;
+    else if (depth === 0 && c === ":" && ternary > 0) ternary--;
+    else if ((c === "," || c === ";" || c === ":") && depth === 0) return i;
+    else if (c === "\n" && depth === 0 && !/[-+*/%&|^!=<>?:.,(]$/.test(last)) {
+      const next = body.slice(i + 1, i + 40).trimStart()[0] || "";
+      if (!/[-+*/%&|^=<>?:.,)\]}]/.test(next) || next === "") return i;
+    }
+    if (!/\s/.test(c)) last = c;
+  }
+  return body.length;
+}
+
+/** Where a let/const/var's declarators that start at `from` end: `;`, a closing bracket, or a line end where
+ *  the declaration doesn't go on. */
+function declarationEnd(body, from) {
+  let depth = 0;
+  let last = "";
+  for (let i = from; i < body.length; i++) {
+    const c = body[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c) && --depth < 0) return i;
+    else if (depth === 0 && c === ";") return i;
+    else if (depth === 0 && c === "\n" && !/[-+*/%&|^!=<>?:.,]$/.test(last)) {
+      const next = body.slice(i + 1, i + 40).trimStart()[0] || "";
+      if (!/[-+*/%&|^=<>?:.,]/.test(next)) return i;
+    }
+    if (!/\s/.test(c)) last = c;
+  }
+  return body.length;
+}
+
+const DEFINES = /(?:^|[{},;])\s*(?:(?:get|set|async|static|private|public|protected|readonly|override)\s+)*\*?\s*$/;
+
+/** [start, end) ranges of `body` where `name` stands for something of the function's own: inside a nested
+ *  function, arrow, method or catch block that takes it as a parameter, inside a for loop that declares it,
+ *  and in the block of a let/const (the function for var), function or class that declares it. */
+function shadowedIn(body, name) {
+  const ranges = [];
+  const n = esc(name);
+  for (const d of body.matchAll(/\b(let|const|var)\s+/g)) {
+    if (/\bas$/.test(tail(body, d.index, 20))) continue; // `as const`
+    const start = d.index + d[0].length;
+    const end = declarationEnd(body, start);
+    if (!topParts(body.slice(start, end)).flatMap(bindingNames).includes(name)) continue;
+    const loop = tail(body, d.index, 40).match(/\bfor\s*(?:await\s*)?\($/);
+    if (loop) {
+      // the loop's own: its header and its body
+      const paren = body.lastIndexOf("(", d.index);
+      const close = matching(body, paren);
+      let from = close + 1;
+      while (/\s/.test(body[from] || "")) from++;
+      const stop = body[from] === "{" ? matching(body, from) + 1 : expressionEnd(body, from);
+      ranges.push([paren, stop <= 0 ? body.length : stop]);
+      continue;
+    }
+    let open = openAround(body, d.index);
+    if (d[1] === "var") while (open >= 0 && !isFunctionBody(body, open)) open = openAround(body, open);
+    ranges.push(blockAt(body, open));
+  }
+  for (const d of body.matchAll(new RegExp("\\b(?:function(?=[\\s*])\\s*(?:\\*\\s*)?|class\\s+)" + n + "(?![\\w$])", "g"))) {
+    const before = tail(body, d.index, 20);
+    const declaration = before === "" || /[{};]$/.test(before) || /\bexport(?:\s+default)?$/.test(before);
+    if (declaration) ranges.push(blockAt(body, openAround(body, d.index)));
+    else {
+      // a named function or class expression: the name is its own, inside it
+      const open = body.indexOf("{", d.index);
+      ranges.push(blockAt(body, open));
+    }
+  }
+  // parameters: function expressions and declarations, methods, catch clauses
+  const KEYWORDS = new Set(["if", "for", "while", "switch", "with", "return", "typeof", "await", "yield", "new", "catch"]);
+  for (const p of body.matchAll(/(?:\bfunction\b(?:\s*\*)?(?:\s*[\w$]+)?|\bcatch|(?<![\w$])([\w$]+))\s*(?:<[^()<>]*(?:<[^()<>]*>[^()<>]*)*>\s*)?\(/g)) {
+    if (p[1] && (KEYWORDS.has(p[1]) || !DEFINES.test(tail(body, p.index)))) continue; // a call, not a method
+    const open = p.index + p[0].length - 1;
+    const close = matching(body, open);
+    if (close < 0) continue;
+    const after = body.slice(close + 1, close + 300).match(/^\s*(?::[^{=;]*)?\{/);
+    if (!after) continue; // a call, not a definition
+    if (!topParts(body.slice(open + 1, close)).flatMap(bindingNames).includes(name)) continue;
+    ranges.push([open, blockAt(body, close + after[0].length)[1]]);
+  }
+  // parameters of arrows: (a, b) => ..., (a): T => ..., a => ...
+  for (const a of body.matchAll(/=>/g)) {
+    const before = tail(body, a.index, 200);
+    const at = trimmedEnd(body, a.index);
+    let start, params;
+    const typed = before.match(/\)\s*(?::[^(){};=]*)?$/);
+    if (typed) {
+      const close = at - typed[0].length;
+      start = openOf(body, close);
+      if (start < 0) continue;
+      params = topParts(body.slice(start + 1, close)).flatMap(bindingNames);
+    } else {
+      const id = before.match(/[A-Za-z_$][\w$]*$/);
+      if (!id) continue;
+      start = at - id[0].length;
+      params = [id[0]];
+    }
+    if (!params.includes(name)) continue;
+    let from = a.index + 2;
+    while (/\s/.test(body[from] || "")) from++;
+    // a function type in an annotation, `(env: string) => number = ...`, binds nothing
+    if (/^[\w$.<>[\]|& ]+=(?![=>])/.test(body.slice(from, from + 200)) && /:\s*$/.test(tail(body, start, 20))) continue;
+    const end = body[from] === "{" ? matching(body, from) + 1 : expressionEnd(body, from);
+    ranges.push([start, end <= 0 ? body.length : end]);
+  }
+  return ranges;
+}
+
+/** Local name -> { mod, member } for the module's top-level imports and requires of a module by name:
+ *  `import { readFileSync as read } from "node:fs"` gives read: fs.readFileSync, `import * as fs from "fs"`
+ *  and `const cp = require("child_process")` give the module itself (member null), and so does a top-level
+ *  `const { readFileSync } = fs` after it. Read from the code with comments blanked out, the module names
+ *  from the source. Relative paths are the app's own and left out; so are `import type` and type-only members,
+ *  and requires that are indented inside a block or function (IO sees one in the function as `require`). */
+function importsOf(src, code) {
+  const out = new Map();
+  const add = (local, mod, member) => {
+    local = local.trim();
+    if (/^[A-Za-z_$][\w$]*$/.test(local) && !/^[./]/.test(mod))
+      out.set(local, { mod, member: member || null });
+  };
+  const braces = [];
+  for (let i = 0, depth = 0; i < code.length; i++)
+    if (code[i] === "{" || code[i] === "}") braces.push([i, (depth += code[i] === "{" ? 1 : -1)]);
+  // at the top of the module: not indented, or outside every brace (regex literals can throw the count off)
+  const topLevel = (m) => {
+    if (!/^[ \t]/.test(m[0])) return true;
+    let lo = 0, hi = braces.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (braces[mid][0] < m.index) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo === 0 || braces[lo - 1][1] === 0;
+  };
+  const spec = (m, g) => src.slice(m.indices[g][0], m.indices[g][1]);
+  /** The first member of `.a.b.c` that isn't `default`. */
+  const first = (chain) => (chain || "").split(".").map((x) => x.trim()).filter((x) => x && x !== "default")[0] || null;
+  /** [member, local] for each name a `{ ... }` pattern takes out of what it destructures; a rest takes the lot. */
+  const destructured = (pattern) =>
+    topParts(pattern.trim().slice(1, -1)).flatMap((part) => {
+      if (part.trim().startsWith("...")) return bindingNames(part).map((local) => [null, local]);
+      const d = defaultOf(part);
+      const head = d < 0 ? part : part.slice(0, d);
+      const colon = colonAt(head);
+      const key = (colon >= 0 ? head.slice(0, colon) : head).trim();
+      return bindingNames(colon >= 0 ? part.slice(colon + 1) : part).map((local) => [/^[\w$]+$/.test(key) ? key : null, local]);
+    });
+
+  // import ... from "x": found by its keyword, then read up to the module name's quote (no backtracking)
+  for (const m of code.matchAll(/^[ \t]*import(?=[\s{*])/gm)) {
+    const from = m.index + m[0].length;
+    const q = code.slice(from, from + 4000).search(/["'`;()]/);
+    if (q < 0 || !/["']/.test(code[from + q])) continue;
+    const head = code.slice(from, from + q).trim();
+    if (!head.endsWith("from")) continue;
+    const clause = head.slice(0, -4).trim();
+    if (!/^[\w$*{}\s,]+$/.test(clause) || /^type[\s{]/.test(clause)) continue;
+    const quote = from + q;
+    const close = code.indexOf(code[quote], quote + 1);
+    if (close < 0) continue;
+    const mod = src.slice(quote + 1, close);
+    const named = clause.match(/\{([^}]*)\}/);
+    for (const part of splitTop(clause.replace(/\{[^}]*\}/, ""))) {
+      const ns = part.match(/^\*\s*as\s+([\w$]+)$/);
+      add(ns ? ns[1] : part, mod, null);
+    }
+    for (const part of named ? splitTop(named[1]) : []) {
+      if (/^type\s+(?!as\b)/.test(part)) continue; // `type as x` imports a member named type
+      const [member, local = member] = part.split(/\s+as\s+/);
+      add(local, mod, member.trim() === "default" ? null : member.trim());
+    }
+  }
+  for (const m of code.matchAll(/^[ \t]*(?:export\s+)?import\s+([\w$]+)\s*=\s*require\s*\(\s*(["'])([^"'\n]*)\2\s*\)/dgm))
+    add(m[1], spec(m, 3), null);
+  const PATTERN = "(\\{[^;{}]*(?:\\{[^;{}]*\\}[^;{}]*)*\\}|[\\w$]+)";
+  const CHAIN = "((?:\\s*\\.\\s*[\\w$]+)*)";
+  const req = new RegExp("^[ \\t]*(?:export\\s+)?(?:const|let|var)\\s+" + PATTERN + "\\s*=\\s*require\\s*\\(\\s*([\"'])([^\"'\\n]*)\\2\\s*\\)" + CHAIN, "dgm");
+  for (const m of code.matchAll(req)) {
+    if (!topLevel(m)) continue;
+    const mod = spec(m, 3);
+    const prop = first(m[4]);
+    if (!m[1].startsWith("{")) add(m[1], mod, prop);
+    else for (const [key, local] of destructured(m[1])) add(local, mod, prop || key);
+  }
+  // a top-level alias of one of them: const { readFileSync } = fs, const read = fs.promises.readFile
+  const alias = new RegExp("^[ \\t]*(?:export\\s+)?(?:const|let|var)\\s+" + PATTERN + "\\s*=\\s*([\\w$]+)" + CHAIN + "\\s*(?=;|$)", "gm");
+  for (const m of code.matchAll(alias)) {
+    const from = out.get(m[2]);
+    if (!from || !topLevel(m)) continue;
+    const member = from.member ?? first(m[3]);
+    if (!m[1].startsWith("{")) add(m[1], from.mod, member);
+    else for (const [key, local] of destructured(m[1])) add(local, from.mod, member || key);
+  }
+  return out;
+}
+
+/** [what, label] for each use in `body` of an imported built-in that does I/O or isn't deterministic.
+ *  A use where the name is the function's own (a parameter of it, or of a nested function, arrow or catch
+ *  around the use, or declared in a block around it) doesn't count, nor does a property, an object key or a
+ *  method's name. Names IO or NONDET already matched (`fs` imported as fs, `performance.now`) aren't
+ *  reported twice. */
+function importedCalls(imports, body, params, seen) {
+  const out = [];
+  for (const [local, { mod, member }] of imports) {
+    if ([...seen].some((t) => t === local || t.startsWith(local + "."))) continue;
+    if (topParts(params).flatMap(bindingNames).includes(local)) continue;
+    let hidden = null;
+    const base = mod.replace(/^node:/, "").split("/")[0];
+    for (const use of body.matchAll(new RegExp("(?<![\\w$.])" + esc(local) + "(?![\\w$])(\\s*\\??\\.\\s*([\\w$]+))?", "g"))) {
+      const before = tail(body, use.index);
+      const after = use.index + local.length;
+      const rest = body.slice(after, after + 300);
+      if (before.endsWith(".")) continue; // a property on the line above: `re\n  .exec(s)`
+      if (/[{,;(]$/.test(before) && /^\s*\??\s*:/.test(rest)) continue; // a key or a typed name: `{ env: x }`, `(env: T) =>`
+      if (DEFINES.test(before) && /^\s*(?:<[^()]*>)?\s*\(/.test(rest)) {
+        const open = after + rest.indexOf("(");
+        const close = matching(body, open);
+        if (close >= 0 && /^\s*(?::[^{=;]*)?\{/.test(body.slice(close + 1, close + 300))) continue; // a method
+      }
+      hidden ??= shadowedIn(body, local);
+      if (hidden.some(([a, b]) => use.index >= a && use.index < b)) continue;
+      const at = member ?? use[2] ?? null;
+      const what = builtin(mod, at);
+      if (what) out.push([what, at ? base + "." + at : base]);
+    }
+  }
+  return out;
+}
+
 const parsed = new Map();
 
 function describe(file, line0, name, entry, root) {
   if (!parsed.has(file)) {
     try {
       const src = readFileSync(file, "utf8");
-      parsed.set(file, { src, code: codeOnly(src), top: topLevelFunctions(src) });
+      const code = codeOnly(src);
+      parsed.set(file, { src, code, top: topLevelFunctions(src), imports: importsOf(src, code) });
     } catch {
       parsed.set(file, null);
     }
   }
   const f = parsed.get(file);
   if (!f) return null;
-  const { src, code, top } = f;
+  const { src, code, top, imports } = f;
   const lines = code.split("\n");
   const n = esc(name);
   const patterns = [
@@ -197,6 +544,7 @@ function describe(file, line0, name, entry, root) {
 
   const io = new Set([...body.matchAll(IO)].map((x) => x[0]));
   const nondet = new Set([...body.matchAll(NONDET)].map((x) => x[0]));
+  for (const [what, label] of importedCalls(imports, body, code.slice(open + 1, close), new Set([...io, ...nondet]))) (what === "io" ? io : nondet).add(label);
   if (/\byield\b/.test(body) && !blockers.some((b) => b.startsWith("generator"))) blockers.push("generator (yield)");
   if (/\bawait\b/.test(body) && !blockers.includes("async")) blockers.push("async");
   if (/\bthis\b/.test(body)) blockers.push("uses this");
