@@ -45,11 +45,17 @@ pub fn snake(name: &str) -> String {
     }
 }
 
-/// How NaN and infinity travel in the JSON (the tag, then the names for NaN, +inf and -inf), unless
-/// the language says otherwise.
+/// How NaN and infinity travel in the JSON: the tag, then the names for NaN, +inf and -inf.
 pub const FLOATS: [&str; 4] = ["$float", "NaN", "Infinity", "-Infinity"];
 
-pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<String>, floats: [&str; 4]) -> String {
+/// The crate's C entry point. With floats, NaN and infinity travel tagged (see native/wire.rs);
+/// without, they can't be passed in, and a NaN or infinite result comes out as null.
+pub fn glue_rs(
+    hs: &Hotspot,
+    port: &Port,
+    default_json: fn(&str) -> Option<String>,
+    floats: Option<[&str; 4]>,
+) -> String {
     let args: Vec<String> = hs
         .params
         .iter()
@@ -66,7 +72,7 @@ pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<Strin
          use serde_json::{{Value, json}};\n\n\
          fn arg<T: serde::de::DeserializeOwned>(args: &[Value], i: usize, default: Option<&str>) -> Result<T, String> {{\n    \
              match args.get(i) {{\n        \
-                 Some(v) => T::deserialize(WireIn(v)).map_err(|e| format!(\"argument {{}}: {{e}}\", i + 1)),\n        \
+                 Some(v) => T::deserialize({read}).map_err(|e| format!(\"argument {{}}: {{e}}\", i + 1)),\n        \
                  None => match default {{\n            \
                      Some(d) => serde_json::from_str(d).map_err(|e| e.to_string()),\n            \
                      None => Err(format!(\"missing argument {{}}\", i + 1)),\n        \
@@ -76,7 +82,7 @@ pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<Strin
          fn call(input: &[u8]) -> Result<Value, String> {{\n    \
              let args: Vec<Value> = serde_json::from_slice(input).map_err(|e| e.to_string())?;\n    \
              let result = port::{func}({args})?;\n    \
-             serde_json::to_value(WireOut(&result)).map_err(|e| e.to_string())\n\
+             serde_json::to_value({write}).map_err(|e| e.to_string())\n\
          }}\n\n\
          /// # Safety\n\
          /// input must point to len readable bytes and out_len to a writable usize.\n\
@@ -105,8 +111,9 @@ pub fn glue_rs(hs: &Hotspot, port: &Port, default_json: fn(&str) -> Option<Strin
          }}\n",
         func = snake(&hs.name),
         args = args.join(", "),
-    ) + &format!("\nconst FLOATS: [&str; 4] = {floats:?};\n\n")
-        + WIRE_RS
+        read = if floats.is_some() { "WireIn(v)" } else { "v" },
+        write = if floats.is_some() { "WireOut(&result)" } else { "result" },
+    ) + &floats.map(|f| format!("\nconst FLOATS: [&str; 4] = {f:?};\n\n{WIRE_RS}")).unwrap_or_default()
         + &format!("\n// {}\n", port.id)
 }
 
@@ -222,7 +229,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port, f: &F
     fs::create_dir_all(dir.join(".cargo"))?;
     fs::write(dir.join("Cargo.toml"), cargo_toml(port))?;
     fs::write(dir.join(".cargo/config.toml"), backend::CARGO_CONFIG)?;
-    fs::write(dir.join("src/lib.rs"), glue_rs(hs, port, f.default_json, FLOATS))?;
+    fs::write(dir.join("src/lib.rs"), glue_rs(hs, port, f.default_json, None))?;
     let body = dir.join("src/port.rs");
     if !body.exists() {
         fs::write(&body, port_rs(hs, port, f))?;
@@ -618,6 +625,35 @@ mod tests {
         assert!(same(&j("null"), &j("[]"), true) && !same(&j("null"), &j("[]"), false));
         assert!(same(&j("{\"a\": [1]}"), &j("{\"a\": [1]}"), false));
         assert!(same(&j("3"), &j("3.0"), false));
+    }
+
+    #[test]
+    fn only_languages_that_read_tagged_floats_get_them() {
+        let hs = Hotspot { name: "mean".into(), params: vec![Default::default()], ..Hotspot::default() };
+        let port = Port {
+            id: "m.mean".into(),
+            file: "m.rb".into(),
+            module: "m".into(),
+            func: "mean".into(),
+            ext: "fa_m_mean".into(),
+            crate_dir: ".fast/ports/m.mean".into(),
+            recorded: 0,
+            calls_seen: 0,
+            verify: None,
+            enabled: false,
+            lang: Lang::Ruby,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        let plain = glue_rs(&hs, &port, |_| None, None);
+        assert!(plain.contains("T::deserialize(v)") && plain.contains("serde_json::to_value(result)"));
+        assert!(!plain.contains("Wire") && !plain.contains("FLOATS"));
+        let tagged = glue_rs(&hs, &port, |_| None, Some(FLOATS));
+        assert!(
+            tagged.contains("T::deserialize(WireIn(v))") && tagged.contains("serde_json::to_value(WireOut(&result))")
+        );
+        assert!(tagged.contains("const FLOATS: [&str; 4] = [\"$float\", \"NaN\", \"Infinity\", \"-Infinity\"];"));
     }
 
     /// The wire code generated into every port, compiled here as it is there.

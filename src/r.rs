@@ -531,7 +531,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
     fs::write(dir.join(".cargo/config.toml"), backend::CARGO_CONFIG)?;
     fs::write(
         dir.join("src/lib.rs"),
-        crate::native::glue_rs(hs, port, default_json, ["$num", "NaN", "Inf", "-Inf"]) + R_GLUE,
+        crate::native::glue_rs(hs, port, default_json, Some(["$num", "NaN", "Inf", "-Inf"])) + R_GLUE,
     )?;
     let body = dir.join("src/port.rs");
     if !body.exists() {
