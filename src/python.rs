@@ -1055,6 +1055,76 @@ sys.exit(1 if fails else 0)
     }
 
     #[test]
+    fn direct_pure_stdlib_calls_are_portable_while_impure_stay_blocked() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fa-pure-direct-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("work.py"),
+            "import datetime\nimport io\nimport os\nimport pathlib\nimport urllib.parse\nimport urllib.request\nimport uuid\n\n\
+             def pure_os_path(a: str, b: str) -> str:\n    return os.path.join(a, b)\n\n\
+             def pure_timedelta(n: int) -> int:\n    return datetime.timedelta(seconds=n).seconds\n\n\
+             def pure_urlparse(s: str) -> str:\n    return urllib.parse.quote(s)\n\n\
+             def pure_stringio(s: str) -> str:\n    return io.StringIO(s).getvalue()\n\n\
+             def pure_purepath(a: str, b: str) -> str:\n    return str(pathlib.PurePosixPath(a, b))\n\n\
+             def pure_uuid5(s: str) -> str:\n    return str(uuid.uuid5(uuid.NAMESPACE_DNS, s))\n\n\
+             def impure_exists(p: str) -> bool:\n    return os.path.exists(p)\n\n\
+             def impure_listdir(p: str) -> int:\n    return len(os.listdir(p)) if False else len(p)\n\n\
+             def impure_now(n: int) -> int:\n    return datetime.datetime.now().year + n\n\n\
+             def impure_uuid4(n: int) -> int:\n    return len(str(uuid.uuid4())) + n\n\n\
+             def impure_urlopen(u: str) -> int:\n    if False:\n        urllib.request.urlopen(u)\n    return len(u)\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app.py"),
+            "import work\n\n\
+             if __name__ == '__main__':\n\
+             \x20   for i in range(5):\n\
+             \x20       work.pure_os_path('a', 'b')\n\
+             \x20       work.pure_timedelta(i)\n\
+             \x20       work.pure_urlparse('a b')\n\
+             \x20       work.pure_stringio('hi')\n\
+             \x20       work.pure_purepath('a', 'b')\n\
+             \x20       work.pure_uuid5('example.com')\n\
+             \x20       work.impure_exists('.')\n\
+             \x20       work.impure_listdir('.')\n\
+             \x20       work.impure_now(i)\n\
+             \x20       work.impure_uuid4(i)\n\
+             \x20       work.impure_urlopen('https://example.com')\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&dir, vec![python.into(), "app.py".into()], None);
+        let _ = fs::remove_dir_all(&dir);
+        let scanned = scanned.unwrap();
+        let by_name = |name: &str| {
+            scanned.hotspots.iter().find(|h| h.name == name).unwrap_or_else(|| panic!("missing hotspot {name}"))
+        };
+        for pure in ["pure_os_path", "pure_timedelta", "pure_urlparse", "pure_stringio", "pure_purepath", "pure_uuid5"]
+        {
+            let h = by_name(pure);
+            assert!(h.portable() && h.blockers.is_empty(), "{pure} should be portable, got {:?}", h.blockers);
+        }
+        for (impure, want) in [
+            ("impure_exists", "does I/O: os.path.exists"),
+            ("impure_listdir", "does I/O: os.listdir"),
+            ("impure_now", "not deterministic: datetime.datetime.now"),
+            ("impure_uuid4", "not deterministic: uuid.uuid4"),
+            ("impure_urlopen", "does I/O: urllib.request.urlopen"),
+        ] {
+            let h = by_name(impure);
+            assert!(!h.portable(), "{impure} must stay blocked");
+            assert_eq!(h.blockers, [want], "{impure}");
+        }
+    }
+
+    #[test]
     fn maps_annotations() {
         assert_eq!(rust_type("str", false).as_deref(), Some("&str"));
         assert_eq!(rust_type("str", true).as_deref(), Some("String"));
