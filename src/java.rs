@@ -581,6 +581,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn varargs_are_portable_as_arrays() {
+        if !Command::new("java").arg("-version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no java on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-java-varargs-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let app = "public class App {\n    static int total(int scale, int... xs) {\n        int s = 0;\n        for (int x : xs) s += x * scale;\n        return s;\n    }\n\n    static int count(String... words) {\n        return words.length;\n    }\n\n    public static void main(String[] args) {\n        System.out.println(total(2, 1, 2, 3) + count(\"a\", \"b\"));\n    }\n}\n";
+        fs::write(dir.join("App.java"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let found = describe(&ctx, "java", &[dir.join("App.java")]);
+        let _ = fs::remove_dir_all(&dir);
+        let found = found.unwrap();
+        for (name, types) in [("total", vec!["int", "int[]"]), ("count", vec!["String[]"])] {
+            let m = found.iter().find(|m| m.name == name).unwrap();
+            assert!(m.blockers.is_empty(), "{name}: {:?}", m.blockers);
+            assert_eq!(m.params.iter().map(|p| p.annotation.as_deref().unwrap()).collect::<Vec<_>>(), types);
+        }
+    }
+
+    #[test]
     fn java_types_map_to_rust() {
         assert_eq!(rust_type("int[][]").as_deref(), Some("Vec<Vec<i32>>"));
         assert_eq!(rust_type("List<String>").as_deref(), Some("Vec<String>"));

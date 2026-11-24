@@ -78,9 +78,9 @@ public class Describe {
             StringBuilder params = new StringBuilder("[");
             Set<String> locals = new HashSet<>();
             for (VariableTree p : mt.getParameters()) {
-                String type = text(p.getType());
-                if (type.contains("...")) blockers.add("takes varargs");
-                else if (!supported(type)) blockers.add("takes a " + type);
+                // varargs arrive as an array, and an array can be passed for them
+                String type = text(p.getType()).replace("...", "[]");
+                if (!supported(type)) blockers.add("takes a " + type);
                 locals.add(p.getName().toString());
                 if (params.length() > 1) params.append(',');
                 params.append("{\"name\":").append(q(p.getName().toString())).append(",\"annotation\":").append(q(type)).append('}');
