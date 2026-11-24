@@ -931,23 +931,28 @@ fn c_put(kind: &CKind, name: &str, params: &[Param], sub: Option<(usize, &str)>,
         Some((k, v)) if k == i => v.to_string(),
         _ => n.to_string(),
     };
-    let v = value(idx, name);
+    let len = match kind {
+        CKind::Array(_, len) => value(*len, &params[*len].name),
+        _ => String::new(),
+    };
+    c_put_value(kind, &value(idx, name), &len)
+}
+
+/// Code that records one argument: the value v (and, for an array, its length n).
+fn c_put_value(kind: &CKind, v: &str, n: &str) -> String {
     match kind {
         CKind::Scalar(Scalar::Int { signed: true, .. }) | CKind::Len => format!("fa_rec_i64((long long) ({v}));"),
         CKind::Scalar(Scalar::Int { signed: false, .. }) => format!("fa_rec_u64((unsigned long long) ({v}));"),
         CKind::Scalar(Scalar::Float(_)) => format!("fa_rec_f64((double) ({v}));"),
         CKind::Scalar(Scalar::Bool) => format!("fa_rec_bool((int) ({v}));"),
         CKind::Str => format!("fa_rec_str({v});"),
-        CKind::Array(s, len) => {
-            let n = value(*len, &params[*len].name);
-            match s {
-                Scalar::Float(_) => format!("fa_rec_arr_f64({v}, (size_t) ({n}), (int) sizeof(*({v})));"),
-                Scalar::Int { signed, .. } => {
-                    format!("fa_rec_arr_i64({v}, (size_t) ({n}), (int) sizeof(*({v})), {});", i32::from(*signed))
-                }
-                Scalar::Bool => format!("fa_rec_arr_i64({v}, (size_t) ({n}), (int) sizeof(*({v})), 0);"),
+        CKind::Array(s, _) => match s {
+            Scalar::Float(_) => format!("fa_rec_arr_f64({v}, (size_t) ({n}), (int) sizeof(*({v})));"),
+            Scalar::Int { signed, .. } => {
+                format!("fa_rec_arr_i64({v}, (size_t) ({n}), (int) sizeof(*({v})), {});", i32::from(*signed))
             }
-        }
+            Scalar::Bool => format!("fa_rec_arr_i64({v}, (size_t) ({n}), (int) sizeof(*({v})), 0);"),
+        },
     }
 }
 
@@ -990,7 +995,15 @@ fn c_record_prologue(hs: &Hotspot) -> Result<String> {
         let (len_expr, sub_val, len_sub, free) = match k {
             CKind::Str => (format!("fa_rec_chars({})", names[i]), "fa_s".to_string(), None, "fa_rec_free(fa_s);"),
             CKind::Array(_, len) => {
-                (format!("(size_t) ({})", names[*len]), format!("{} + fa_off", names[i]), Some(*len), "")
+                // an empty slice is (NULL, 0) where the case runs in a child process (see rec.c)
+                let ty = hs.params[i].annotation.clone().unwrap_or_default();
+                let n = &names[i];
+                (
+                    format!("(size_t) ({})", names[*len]),
+                    format!("(fa_n ? {n} + fa_off : ({ty}) fa_rec_empty({n}))"),
+                    Some(*len),
+                    "",
+                )
             }
             _ => continue,
         };
@@ -1037,15 +1050,120 @@ fn c_record_prologue(hs: &Hotspot) -> Result<String> {
             put_line.push(' ');
         }
         derive.push_str(&format!(
-            "    for (int fa_k = 0; fa_k < 10 && fa_rec_derive_ok(); fa_k++) {{\n        size_t fa_len = {len_expr}, fa_n = (size_t) fa_rec_slices[fa_k];\n        if (fa_len < 2 || fa_n >= fa_len) break;\n        for (int fa_rep = 0; fa_rep < (fa_n < 2 ? 1 : 3); fa_rep++) {{\n            size_t fa_off = fa_rec_rand(fa_len - fa_n + 1);\n            {prep}fa_rec_begin(); {put_line}\n            fa_rec_derived_{sfx}({cast} {call});\n            {free}\n        }}\n    }}\n",
+            "    for (int fa_k = 0; fa_k < 10 && fa_rec_derive_ok(); fa_k++) {{\n        size_t fa_len = {len_expr}, fa_n = (size_t) fa_rec_slices[fa_k];\n        if (fa_len < 2 || fa_n >= fa_len) break;\n        for (int fa_rep = 0; fa_rep < (fa_n < 2 ? 1 : 3); fa_rep++) {{\n            size_t fa_off = fa_rec_rand(fa_len - fa_n + 1);\n            {prep}fa_rec_begin(); {put_line}\n            if (fa_rec_fork(2)) fa_rec_answer_{sfx}({cast} {call});\n            {free}\n        }}\n    }}\n",
             call = call(&subs),
         ));
     }
+    let edges = c_edges(hs, &kinds, sfx, cast);
     Ok(format!(
-        "if (!fa_rec_inside) {{\n    fa_rec_inside = 1;\n    fa_rec_begin(); {puts}\n    long long fa_t0 = fa_rec_now();\n    {ret} fa_r = {call};\n    fa_rec_done_{sfx}({cast} fa_r, fa_rec_now() - fa_t0);\n{derive}    fa_rec_inside = 0;\n    return fa_r;\n}}",
+        "if (!fa_rec_inside) {{\n    fa_rec_inside = 1;\n    fa_rec_begin(); {puts}\n    long long fa_t0 = fa_rec_now();\n    {ret} fa_r = {call};\n    fa_rec_done_{sfx}({cast} fa_r, fa_rec_now() - fa_t0);\n{edges}{derive}    fa_rec_inside = 0;\n    return fa_r;\n}}",
         puts = puts(None),
         call = call(&[]),
     ))
+}
+
+/// Edge cases for a C function, from the first recorded calls: special numbers, non-ASCII text,
+/// empty and much bigger inputs, each varied on its own from short versions of the inputs (text
+/// cut to 64 characters, arrays to 8 items). The original answers each one in a child process
+/// (see rec.c). An empty array is (NULL, 0), so a function that reads it anyway crashes there and
+/// the case is skipped, instead of reading memory that isn't part of the input.
+fn c_edges(hs: &Hotspot, kinds: &[CKind], sfx: &str, cast: &str) -> String {
+    let names = arg_names(hs);
+    let annot = |i: usize| hs.params[i].annotation.clone().unwrap_or_else(|| "int".into());
+    let numbers = |s: Scalar| -> Option<&'static str> {
+        match s {
+            Scalar::Int { signed: true, .. } => Some("0, 1, -1"),
+            Scalar::Int { signed: false, .. } => Some("0, 1"),
+            Scalar::Float("f32") => Some("0, 1, -1, 1e30"),
+            Scalar::Float(_) => Some("0, 1, -1, 1e300"),
+            Scalar::Bool => None,
+        }
+    };
+    let mut base = names.clone();
+    let (mut prep, mut free) = (String::new(), String::new());
+    for (i, k) in kinds.iter().enumerate() {
+        match k {
+            CKind::Str => {
+                prep.push_str(&format!("char *fa_b{i} = {n} ? fa_rec_substr({n}, 0, 64) : 0;\n        ", n = names[i]));
+                free.push_str(&format!("fa_rec_free(fa_b{i}); "));
+                base[i] = format!("fa_b{i}");
+            }
+            CKind::Array(_, l) => {
+                let n = &names[*l];
+                prep.push_str(&format!("size_t fa_l{l} = (size_t) ({n}) < 8 ? (size_t) ({n}) : 8;\n        "));
+                base[*l] = format!("({}) fa_l{l}", annot(*l));
+            }
+            _ => {}
+        }
+    }
+    // one case: record the arguments, then have the original answer in a child process
+    let case = |subs: &[(usize, String)], keep: bool| -> String {
+        let mut vals = base.clone();
+        for (i, v) in subs {
+            vals[*i] = v.clone();
+        }
+        let puts: Vec<String> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| match k {
+                CKind::Array(_, l) => c_put_value(k, &vals[i], &vals[*l]),
+                _ => c_put_value(k, &vals[i], ""),
+            })
+            .collect();
+        format!(
+            "fa_rec_begin(); {} if (fa_rec_fork({})) fa_rec_answer_{sfx}({cast} {}({}));",
+            puts.join(" "),
+            i32::from(keep),
+            hs.name,
+            vals.join(", ")
+        )
+    };
+    // 4x bigger each step, up to 4096 items or characters, while its time (assumed quadratic) fits
+    let grow = "for (int fa_f = 4; fa_f <= 512 && fa_rec_edge_took >= 0 && fa_rec_edge_ok() && fa_rec_edge_took * 16 <= fa_rec_edge_left() / 2; fa_f = fa_f == 256 ? 512 : fa_f * 4)";
+    let mut body = String::new();
+    for (i, k) in kinds.iter().enumerate() {
+        let name = &names[i];
+        match k {
+            CKind::Scalar(s) => {
+                let Some(list) = numbers(*s) else { continue };
+                let ty = annot(i);
+                body.push_str(&format!(
+                    "        {{\n            static const double fa_e[] = {{{list}}};\n            for (int fa_k = 0; fa_k < (int) (sizeof fa_e / sizeof *fa_e) && fa_rec_edge_ok(); fa_k++) {{\n                {ty} fa_v = ({ty}) fa_e[fa_k];\n                if (fa_v == {name}) continue;\n                {}\n            }}\n        }}\n",
+                    case(&[(i, "fa_v".into())], true)
+                ));
+            }
+            CKind::Str => body.push_str(&format!(
+                "        if (fa_b{i}) {{\n            for (int fa_k = 0; fa_k < 5 && fa_rec_edge_ok(); fa_k++) {{\n                char *fa_v = fa_rec_str_edge(fa_b{i}, fa_k);\n                if (!fa_v) continue;\n                {}\n                fa_rec_free(fa_v);\n            }}\n            if (fa_rec_grow({i})) {{\n                {}\n                {grow} {{\n                    char *fa_g = fa_rec_str_repeat(fa_b{i}, fa_f);\n                    if (!fa_g) break;\n                    {}\n                    fa_rec_free(fa_g);\n                }}\n            }}\n        }}\n",
+                case(&[(i, "fa_v".into())], true),
+                case(&[], false),
+                case(&[(i, "fa_g".into())], true),
+            )),
+            CKind::Array(s, l) => {
+                let (ty, lt) = (annot(i), annot(*l));
+                let elem = squash(&ty).replace("const", "").trim_end_matches('*').trim().to_string();
+                body.push_str(&format!(
+                    "        if (fa_rec_edge_ok()) {{\n            {}\n        }}\n",
+                    case(&[(i, format!("({ty}) 0")), (*l, format!("({lt}) 0"))], true)
+                ));
+                if let Some(list) = numbers(*s) {
+                    body.push_str(&format!(
+                        "        if (fa_l{l} > 0) {{\n            static const double fa_e[] = {{{list}}};\n            {elem} *fa_c = ({elem} *) fa_rec_dup({name}, fa_l{l}, sizeof *({name}));\n            for (int fa_k = 0; fa_k < (int) (sizeof fa_e / sizeof *fa_e) && fa_rec_edge_ok(); fa_k++) {{\n                fa_c[0] = ({elem}) fa_e[fa_k];\n                if (fa_c[0] == ({name})[0]) continue;\n                {}\n            }}\n            fa_rec_free(fa_c);\n        }}\n",
+                        case(&[(i, "fa_c".into())], true)
+                    ));
+                }
+                body.push_str(&format!(
+                    "        if (fa_l{l} > 0 && fa_rec_grow({i})) {{\n            {}\n            {grow} {{\n                {elem} *fa_g = ({elem} *) fa_rec_repeat({name}, fa_l{l}, sizeof *({name}), fa_f);\n                if (!fa_g) break;\n                {}\n                fa_rec_free(fa_g);\n            }}\n        }}\n",
+                    case(&[], false),
+                    case(&[(i, "fa_g".into()), (*l, format!("({lt}) (fa_l{l} * (size_t) fa_f)"))], true),
+                ));
+            }
+            CKind::Len => {}
+        }
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("    if (fa_rec_edge_call()) {{\n        {prep}\n{body}        {free}\n    }}\n")
 }
 
 fn cpp_record_prologue(hs: &Hotspot) -> String {
@@ -1440,6 +1558,36 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
         Some(text.lines().map(|l| serde_json::from_str(l).unwrap()).collect())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c_edge_cases_run_where_a_crash_or_hang_is_contained() {
+        use serde_json::json;
+        // score crashes on an emoji, never returns for k == -1 and reads xs[0] even when n is 0
+        let source = "#include <stddef.h>\n#include <string.h>\nlong score(const char *s, const int *xs, size_t n, int k)\n{\n    if (strstr(s, \"\\xF0\\x9F\\x91\\x8D\")) { volatile int *p = 0; return *p; }\n    if (k == -1) for (;;) {}\n    long t = (long) strlen(s) + k + ((volatile const int *) xs)[0] * 0;\n    for (size_t i = 0; i < n; i++) t += xs[i];\n    return t;\n}\nint main(void) {\n    char s[201] = {0};\n    for (int i = 0; i < 40; i++) strcat(s, \"word \");\n    int xs[24];\n    for (int i = 0; i < 24; i++) xs[i] = i;\n    long t = 0;\n    for (int k = 0; k < 3; k++) t += score(s, xs, 20 + k, k);\n    return t > 0 ? 0 : 1;\n}\n";
+        let Some(cases) = record_c(source, "score") else {
+            eprintln!("no C compiler on PATH, skipping");
+            return;
+        };
+        let edges: Vec<&Value> = cases.iter().filter(|c| c["derived"] == "edge").collect();
+        let has = |i: usize, want: Value| edges.iter().any(|c| c["args"][i] == want);
+        let short: String = "word ".repeat(40).chars().take(64).collect();
+        assert!(has(0, json!("")) && has(0, json!(format!("{short}\u{65e5}\u{672c}"))), "text: {edges:?}");
+        assert!(has(3, json!(1)), "special numbers: {edges:?}");
+        assert!(edges.iter().any(|c| c["args"][1].as_array().is_some_and(|a| a.len() == 8 * 16)), "bigger arrays");
+        assert!(edges.iter().all(|c| c["args"][3] != json!(-1)), "a case that never returns");
+        assert!(!cases.iter().any(|c| c["args"][0].as_str().is_some_and(|s| s.contains('\u{1f44d}'))), "a crash");
+        assert!(!cases.iter().any(|c| c["args"][1] == json!([])), "an empty array the original reads anyway");
+        for c in &cases {
+            let a = c["args"].as_array().unwrap();
+            let xs = a[1].as_array().unwrap();
+            assert_eq!(xs.len() as u64, a[2].as_u64().unwrap(), "{c}");
+            let want = a[0].as_str().unwrap().len() as i64
+                + a[3].as_i64().unwrap()
+                + xs.iter().map(|x| x.as_i64().unwrap()).sum::<i64>();
+            assert_eq!(c["result"].as_i64(), Some(want), "{c}");
+        }
     }
 
     #[test]
