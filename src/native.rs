@@ -177,7 +177,14 @@ fn sample_calls(path: &Path, func: &str, n: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path, f: &Flavor) -> String {
+pub fn task_md(
+    hs: &Hotspot,
+    helpers: &[Hotspot],
+    port: &Port,
+    crate_dir: &Path,
+    f: &Flavor,
+    held_out: usize,
+) -> String {
     let fence = "```";
     let label = f.lang.label();
     let samples = sample_calls(&crate_dir.join("recordings.jsonl"), &hs.name, 8).join("\n");
@@ -203,7 +210,7 @@ Only edit files in this folder. Don't touch the {label} project.\n\n\
 ## The original ({file}:{line})\n\n{fence}{lang}\n{source}\n{fence}\n\n\
 {helper_md}\
 ## Real calls\n\n\
-fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
+fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n{held}\
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, non-ASCII text, very long input. verify tests these too.\n\
 {rules}\
@@ -220,7 +227,8 @@ Run `cargo check` here. Then fast-anything builds the crate in release mode and 
         line = hs.line,
         lang = f.fence,
         source = hs.source,
-        recorded = port.recorded,
+        recorded = port.recorded.saturating_sub(held_out),
+        held = backend::held_out_note(held_out),
         seen = util::thousands(port.calls_seen),
     )
 }
@@ -236,7 +244,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port, f: &F
     if !body.exists() {
         fs::write(&body, port_rs(hs, port, f))?;
     }
-    let task = task_md(hs, helpers, port, &dir, f);
+    let task = task_md(hs, helpers, port, &dir, f, ctx.held_out(port));
     fs::write(dir.join("TASK.md"), &task)?;
     Ok(task)
 }
@@ -265,10 +273,11 @@ fn half() -> f64 {
 pub fn verify(ctx: &Ctx, port: &Port, loose_empty: bool) -> Result<Verify> {
     let dir = ctx.crate_dir(port);
     let (_, lib) = port.lang.artifact(&port.ext);
-    let out = dir.join("verify.json");
+    let replay = backend::replay(ctx, port)?;
+    let out = replay.out;
     let _ = fs::remove_file(&out);
     let job = json!({
-        "lib": ctx.lib_dir().join(lib), "cases": dir.join("recordings.jsonl"), "meta": dir.join("recordings.meta.json"),
+        "lib": ctx.lib_dir().join(lib), "cases": replay.cases, "meta": dir.join("recordings.meta.json"),
         "func": port.func, "out": out, "loose_empty": loose_empty,
     });
     let job_path = dir.join("job-verify.json");
@@ -278,7 +287,7 @@ pub fn verify(ctx: &Ctx, port: &Port, loose_empty: bool) -> Result<Verify> {
     let mut v = if run.status.success() && out.exists() {
         serde_json::from_str::<Verify>(&fs::read_to_string(&out)?).context("reading verify results")?
     } else {
-        let total = fs::read_to_string(dir.join("recordings.jsonl")).map(|t| t.lines().count()).unwrap_or(0);
+        let total = util::count_lines(&replay.cases);
         Verify {
             total,
             failed: total,
@@ -326,7 +335,7 @@ pub fn replay(job_path: &Path) -> Result<()> {
         }
     };
 
-    let text = fs::read_to_string(&job.cases).context("reading recordings.jsonl")?;
+    let text = fs::read_to_string(&job.cases).context("reading the recorded calls")?;
     let cases: Vec<Value> =
         text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok()).collect();
     let (mut passed, mut failed, mut derived, mut edges) = (0, 0, 0, 0);

@@ -67,6 +67,8 @@ pub struct Verify {
     pub derived: usize,
     /// Of derived: edge cases (special numbers, non-ASCII text, empty and much bigger inputs).
     pub edges: usize,
+    /// Of total, not derived: recorded calls kept out of the crate folder (see backend::hold_out).
+    pub held_out: usize,
     pub passed: usize,
     pub failed: usize,
     pub failures: Vec<Failure>,
@@ -222,6 +224,17 @@ impl Ctx {
 
     pub fn crate_dir(&self, port: &Port) -> PathBuf {
         self.root.join(port.crate_dir.replace('/', std::path::MAIN_SEPARATOR_STR))
+    }
+
+    /// Recorded calls of the port kept out of its crate folder, so the agent writing it never sees them.
+    pub fn holdout(&self, port: &Port) -> PathBuf {
+        let name = Path::new(&port.crate_dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.fast.join("holdout").join(format!("{name}.jsonl"))
+    }
+
+    /// How many recorded calls of the port are held out.
+    pub fn held_out(&self, port: &Port) -> usize {
+        util::count_lines(&self.holdout(port))
     }
 
     pub fn base_dir(&self) -> PathBuf {

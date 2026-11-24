@@ -973,7 +973,9 @@ def cmd_verify(job, _argv):
     with open(job["cases"], encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]
     recorded = len(cases)
-    derived = derive(original, cases, job.get("derive_budget", 3.0), job.get("derive_limit", 200))
+    # held-out calls (at the end) only get replayed: shrinking them would show their values in failures
+    visible = cases[:recorded - job.get("held_out", 0)]
+    derived = derive(original, visible, job.get("derive_budget", 3.0), job.get("derive_limit", 200))
     cases += derived
 
     report = {"total": len(cases), "derived": len(derived), "passed": 0, "failed": 0, "failures": [],

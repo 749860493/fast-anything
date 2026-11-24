@@ -211,7 +211,7 @@ fn sample_calls(path: &Path, func: &str, n: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path) -> String {
+pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path, held_out: usize) -> String {
     let fence = "```";
     let samples = sample_calls(&crate_dir.join("recordings.jsonl"), &hs.name, 8).join("\n");
     let mut helper_md = String::new();
@@ -233,7 +233,7 @@ Only edit files in this folder. Don't touch the Ruby project.\n\n\
 ## The original ({file}:{line})\n\n{fence}ruby\n{source}\n{fence}\n\n\
 {helper_md}\
 ## Real calls\n\n\
-fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
+fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON. A few:\n\n{fence}\n{samples}\n{fence}\n\n{held}\
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
 - Change the `serde_json::Value` parameter and return types to concrete ones: they're deserialized for you.\n\
@@ -251,7 +251,8 @@ Run `cargo check` here. Then fast-anything builds the crate in release mode and 
         file = hs.file,
         line = hs.line,
         source = hs.source,
-        recorded = port.recorded,
+        recorded = port.recorded.saturating_sub(held_out),
+        held = backend::held_out_note(held_out),
         seen = crate::util::thousands(port.calls_seen),
     )
 }
@@ -267,19 +268,19 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
     if !body.exists() {
         fs::write(&body, port_rs(hs, port))?;
     }
-    let task = task_md(hs, helpers, port, &dir);
+    let task = task_md(hs, helpers, port, &dir, ctx.held_out(port));
     fs::write(dir.join("TASK.md"), &task)?;
     Ok(task)
 }
 
 pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
     let ruby = ctx.runtime()?;
-    let dir = ctx.crate_dir(port);
-    let out = dir.join("verify.json");
+    let replay = backend::replay(ctx, port)?;
+    let out = replay.out;
     let (_, lib) = backend::Lang::Ruby.artifact(&port.ext);
     let job = json!({
         "lib": ctx.lib_dir().join(lib), "func": port.func, "owner": owner(port.owner.as_deref()),
-        "module_file": ctx.root.join(&port.file), "cases": dir.join("recordings.jsonl"), "out": out, "budget": 0.5,
+        "module_file": ctx.root.join(&port.file), "cases": replay.cases, "held_out": replay.held_out, "out": out, "budget": 0.5,
     });
     runner(ctx, ruby, "verify", job, &[])?;
     let mut v: Verify = serde_json::from_str(&fs::read_to_string(&out)?).context("reading verify results")?;
