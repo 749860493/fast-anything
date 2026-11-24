@@ -1010,6 +1010,18 @@ CASES = [
     ("rebind from own value", "def f():\n    import subprocess as sp\n    sp = sp.run(['true'])\n    return sp\n", "f", ["does I/O: subprocess.run"]),
     ("with target from own call", "def f():\n    from pathlib import Path\n    with Path('x').open() as Path:\n        pass\n", "f", ["does I/O: pathlib.Path"]),
     ("class in class", "import subprocess as sp\ndef f():\n    class C:\n        sp = 1\n        class D:\n            y = sp.run(['true'])\n    return C\n", "f", ["does I/O: subprocess.run"]),
+    ("direct os.path.join pure", "import os\ndef f(a, b):\n    return os.path.join(a, b)\n", "f", []),
+    ("direct timedelta pure", "import datetime\ndef f(n):\n    return datetime.timedelta(seconds=n)\n", "f", []),
+    ("direct urllib.parse.quote pure", "import urllib.parse\ndef f(s):\n    return urllib.parse.quote(s)\n", "f", []),
+    ("direct StringIO pure", "import io\ndef f(s):\n    return io.StringIO(s).getvalue()\n", "f", []),
+    ("direct PurePosixPath pure", "import pathlib\ndef f(a, b):\n    return str(pathlib.PurePosixPath(a, b))\n", "f", []),
+    ("direct uuid5 pure", "import uuid\ndef f(s):\n    return str(uuid.uuid5(uuid.NAMESPACE_DNS, s))\n", "f", []),
+    ("direct os.path.exists io", "import os\ndef f(p):\n    return os.path.exists(p)\n", "f", ["does I/O: os.path.exists"]),
+    ("direct os.listdir io", "import os\ndef f(p):\n    return os.listdir(p)\n", "f", ["does I/O: os.listdir"]),
+    ("direct datetime.now nondet", "import datetime\ndef f():\n    return datetime.datetime.now()\n", "f", ["not deterministic: datetime.datetime.now"]),
+    ("direct uuid4 nondet", "import uuid\ndef f():\n    return uuid.uuid4()\n", "f", ["not deterministic: uuid.uuid4"]),
+    ("direct urlopen io", "import urllib.request\ndef f(u):\n    return urllib.request.urlopen(u)\n", "f", ["does I/O: urllib.request.urlopen"]),
+    ("aliased time as datetime nondet", "import time as datetime\ndef f():\n    return datetime.time()\n", "f", ["not deterministic: time.time"]),
 ]
 fails = 0
 for i, (label, src, func, want) in enumerate(CASES):
@@ -1055,7 +1067,7 @@ sys.exit(1 if fails else 0)
     }
 
     #[test]
-    fn direct_pure_stdlib_calls_are_portable_while_impure_stay_blocked() {
+    fn direct_pure_stdlib_call_is_portable_in_scan() {
         let Some(python) = ["python3", "python"]
             .into_iter()
             .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
@@ -1068,63 +1080,34 @@ sys.exit(1 if fails else 0)
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("work.py"),
-            "import datetime\nimport io\nimport os\nimport pathlib\nimport urllib.parse\nimport urllib.request\nimport uuid\n\n\
-             def pure_os_path(a: str, b: str) -> str:\n    return os.path.join(a, b)\n\n\
-             def pure_timedelta(n: int) -> int:\n    return datetime.timedelta(seconds=n).seconds\n\n\
-             def pure_urlparse(s: str) -> str:\n    return urllib.parse.quote(s)\n\n\
-             def pure_stringio(s: str) -> str:\n    return io.StringIO(s).getvalue()\n\n\
-             def pure_purepath(a: str, b: str) -> str:\n    return str(pathlib.PurePosixPath(a, b))\n\n\
-             def pure_uuid5(s: str) -> str:\n    return str(uuid.uuid5(uuid.NAMESPACE_DNS, s))\n\n\
-             def impure_exists(p: str) -> bool:\n    return os.path.exists(p)\n\n\
-             def impure_listdir(p: str) -> int:\n    return len(os.listdir(p)) if False else len(p)\n\n\
-             def impure_now(n: int) -> int:\n    return datetime.datetime.now().year + n\n\n\
-             def impure_uuid4(n: int) -> int:\n    return len(str(uuid.uuid4())) + n\n\n\
-             def impure_urlopen(u: str) -> int:\n    if False:\n        urllib.request.urlopen(u)\n    return len(u)\n\n\
-             def impure_aliased_time() -> float:\n    import time as datetime\n    return datetime.time()\n",
+            "import os\n\n\
+             def join_all(items: list[tuple[str, str]]) -> int:\n\
+             \x20   total = 0\n\
+             \x20   for a, b in items:\n\
+             \x20       total += len(os.path.join(a, b))\n\
+             \x20   return total\n",
         )
         .unwrap();
         fs::write(
             dir.join("app.py"),
             "import work\n\n\
              if __name__ == '__main__':\n\
-             \x20   for i in range(5):\n\
-             \x20       work.pure_os_path('a', 'b')\n\
-             \x20       work.pure_timedelta(i)\n\
-             \x20       work.pure_urlparse('a b')\n\
-             \x20       work.pure_stringio('hi')\n\
-             \x20       work.pure_purepath('a', 'b')\n\
-             \x20       work.pure_uuid5('example.com')\n\
-             \x20       work.impure_exists('.')\n\
-             \x20       work.impure_listdir('.')\n\
-             \x20       work.impure_now(i)\n\
-             \x20       work.impure_uuid4(i)\n\
-             \x20       work.impure_urlopen('https://example.com')\n\
-             \x20       work.impure_aliased_time()\n",
+             \x20   pairs = [('dir', f'file_{i}.txt') for i in range(200)]\n\
+             \x20   total = 0\n\
+             \x20   for _ in range(300):\n\
+             \x20       total += work.join_all(pairs)\n\
+             \x20   print(total)\n",
         )
         .unwrap();
         let scanned = crate::pipeline::scan(&dir, vec![python.into(), "app.py".into()], None);
         let _ = fs::remove_dir_all(&dir);
         let scanned = scanned.unwrap();
-        let by_name = |name: &str| {
-            scanned.hotspots.iter().find(|h| h.name == name).unwrap_or_else(|| panic!("missing hotspot {name}"))
-        };
-        for pure in ["pure_os_path", "pure_timedelta", "pure_urlparse", "pure_stringio", "pure_purepath", "pure_uuid5"]
-        {
-            let h = by_name(pure);
-            assert!(h.portable() && h.blockers.is_empty(), "{pure} should be portable, got {:?}", h.blockers);
-        }
-        for (impure, want) in [
-            ("impure_exists", "does I/O: os.path.exists"),
-            ("impure_listdir", "does I/O: os.listdir"),
-            ("impure_now", "not deterministic: datetime.datetime.now"),
-            ("impure_uuid4", "not deterministic: uuid.uuid4"),
-            ("impure_urlopen", "does I/O: urllib.request.urlopen"),
-            ("impure_aliased_time", "not deterministic: time.time"),
-        ] {
-            let h = by_name(impure);
-            assert!(!h.portable(), "{impure} must stay blocked");
-            assert_eq!(h.blockers, [want], "{impure}");
-        }
+        let h = scanned
+            .hotspots
+            .iter()
+            .find(|h| h.name == "join_all")
+            .unwrap_or_else(|| panic!("missing hotspot join_all; got {:?}", scanned.hotspots));
+        assert!(h.portable() && h.blockers.is_empty(), "join_all should be portable, got {:?}", h.blockers);
     }
 
     #[test]
