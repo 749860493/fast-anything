@@ -334,8 +334,12 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(lib)));
     let lib_lit = format!("'{}'", lib_rel.replace('\\', "\\\\").replace('\'', "\\'"));
     let bridge = BRIDGE.replace("/*CLASS*/", &class).replace("/*ID*/", &port.id).replace("/*LIB*/", &lib_lit);
+    // in the file's own line endings (a Windows checkout gives bridge.php CRLF), so disable finds
+    // what it added
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let bridge = bridge.replace("\r\n", "\n").replace('\n', nl);
     let (bridge, class) =
-        if braced { (format!("namespace {{\n{bridge}\n}}"), format!("\\{class}")) } else { (bridge, class) };
+        if braced { (format!("namespace {{{nl}{bridge}{nl}}}"), format!("\\{class}")) } else { (bridge, class) };
     let prologue =
         format!("if ({class}::$on ?? {class}::load()) return {class}::call({}, func_get_args());", name_const(hs));
     let patched =
