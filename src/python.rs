@@ -783,7 +783,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 - Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
 - Python `str` indexes by Unicode code point: use `.chars()` (or bytes only after checking `is_ascii()`).\n\
 - Python ints don't overflow. `i64` is fine unless the recorded values are bigger.\n\
-- Float results are compared with a relative tolerance of 1e-9. Keep the same order of operations.\n\
+- Floats must match within 1e-9 of their size (or of the largest value in the same list), and zeros keep their sign: -0.0 is not 0.0. Keep the same order of float operations.\n\
 - Where Python raises, raise too (`PyValueError::new_err(...)`, `PyKeyError`, ...).\n\
 - Make it fast: no needless allocation or cloning, borrow inputs, `with_capacity`, fast paths for common cases.\n\
 - std only, unless a crate clearly pays off. Keep the function and module names as they are.\n\
@@ -1481,14 +1481,21 @@ sys.exit(1 if fails else 0)
         };
         let runner = std::env::temp_dir().join(format!("fa-runner-test-{}.py", std::process::id()));
         fs::write(&runner, RUNNER).unwrap();
-        let check = "import runpy, sys\n\
+        let check = "import math, runpy, sys\n\
                      same = runpy.run_path(sys.argv[1])['same']\n\
                      assert not same(3.0, 3) and not same(3, 3.0)\n\
                      assert not same([1.5, 2.0], [1.5, 2])\n\
                      assert not same({'k': 2.0}, {'k': 2})\n\
                      assert same(3.0, 3.0 + 1e-12) and same(3, 3) and same((1.0, 2), (1.0, 2))\n\
                      assert not same((1, 2), [1, 2]) and not same([(1, 2)], [[1, 2]])\n\
-                     assert same(float('nan'), float('nan')) and not same(True, 1)\n";
+                     assert same(float('nan'), float('nan')) and not same(True, 1)\n\
+                     assert not same(4.2441e-19, 4.2441e-28) and not same(-0.0, 0.0) and same(-0.0, -0.0)\n\
+                     assert same([1.0, 2.0, 5.551115123125783e-17], [1.0, 2.0, 0.0])\n\
+                     assert same((1, 5.551115123125783e-17), (1, 0.0)) and not same([[1.0], 5.551115123125783e-17], [[1.0], 0.0])\n\
+                     assert not same({'a': 1.0, 'b': 5.551115123125783e-17}, {'a': 1.0, 'b': 0.0})\n\
+                     assert same(1.0, 1.0 + 5e-10) and not same(1.0, 1.0 + 2e-9)\n\
+                     assert not same(math.inf, -math.inf) and not same([1e308, math.inf], [1e308, 1e308])\n\
+                     assert same([10 ** 400, 1.0], [10 ** 400, 1.0]) and not same([10 ** 400, 1.0], [10 ** 400 + 1, 1.0])\n";
         let out = Command::new(python).args(["-I", "-c", check]).arg(&runner).output().unwrap();
         let _ = fs::remove_file(&runner);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -1664,6 +1671,11 @@ sys.exit(1 if fails else 0)
                      assert type(dec(json.loads(json.dumps(enc(np.int32(7)))))) is np.int32\n\
                      assert not same(a, a.astype(np.float32)) and not same(a, a.tolist()) and not same(a, a[0])\n\
                      assert same(np.array([math.nan, 1.0]), np.array([math.nan, 1.0 + 1e-12]))\n\
+                     assert not same(np.array([1.0, -0.0]), np.array([1.0, 0.0])) and same(np.array([-0.0]), np.array([-0.0]))\n\
+                     assert not same(np.array([4.2441e-19, 5e-19]), np.array([4.2441e-28, 5e-28])) and same(np.array([4.2441e-19, 0.0]), np.array([4.2441e-19, 1e-30]))\n\
+                     assert same(np.array([[1.0, 2.0], [5.551115123125783e-17, math.inf]]), np.array([[1.0, 2.0], [0.0, math.inf]]))\n\
+                     assert not same(np.array([math.inf, 1.0]), np.array([-math.inf, 1.0])) and not same(np.array([math.inf]), np.array([1e308]))\n\
+                     assert not same(np.array([1.0, 1.0]), np.array([1.0, 1.0 + 2e-9])) and same(np.zeros((0, 2)), np.zeros((0, 2)))\n\
                      assert same(np.float64(0.5), 0.5) and not same(np.int64(3), 3.0)\n\
                      x = np.array([1.0, 2.0, 3.0])\n\
                      e = edges(x); assert len(e[0]) == 0 and math.isnan(e[1][0]) and x[0] == 1.0\n\

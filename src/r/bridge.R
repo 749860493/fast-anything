@@ -94,8 +94,9 @@
   .fa_like(original, function(args) invoke(port, unname(args)))
 }
 
-# Same result the way R code sees it: integer and double are both numbers, doubles within 1e-9,
-# NA where NA, zero-length vectors and NULL alike, names and list structure must match.
+# Same result the way R code sees it: integer and double are both numbers, doubles within 1e-9 of
+# their size or of the largest in the expected vector (unless both are whole), -0 isn't 0 (1/x
+# differs), NA where NA, zero-length vectors and NULL alike, names and list structure must match.
 .fa_same <- function(a, b) {
   if (length(a) == 0L && length(b) == 0L && !is.list(a) && !is.list(b)) return(TRUE)
   if (is.list(a) || is.list(b)) {
@@ -115,7 +116,9 @@
     if (!identical(a[inf], b[inf])) return(FALSE)
     a <- a[!inf]
     b <- b[!inf]
-    return(all(a == b | abs(a - b) <= pmax(1e-12, 1e-9 * pmax(abs(a), abs(b)))))
+    scale <- max(abs(a), 0)
+    tol <- 1e-9 * pmax(abs(a), abs(b), ifelse(a == round(a) & b == round(b), 0, scale))
+    return(all(ifelse(a == b, 1 / a == 1 / b, abs(a - b) <= tol)))
   }
   identical(typeof(a), typeof(b)) && identical(unname(a), unname(b))
 }

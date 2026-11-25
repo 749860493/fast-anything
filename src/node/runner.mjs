@@ -876,11 +876,15 @@ function dec(v) {
   throw new Error("unknown tag " + tag);
 }
 
-function same(a, b) {
+// Numbers match within 1e-9 of their size, or of `scale` (the largest number in the expected array
+// holding them) unless both are whole. -0 isn't 0: it prints differently.
+function same(a, b, scale = 0) {
   if (a == null && b == null) return true;
   if (typeof a === "number" && typeof b === "number") {
-    if (Number.isNaN(a) || Number.isNaN(b)) return Number.isNaN(a) && Number.isNaN(b);
-    return a === b || Math.abs(a - b) <= Math.max(1e-12, 1e-9 * Math.max(Math.abs(a), Math.abs(b)));
+    if (a === b || Number.isNaN(a) || Number.isNaN(b)) return Object.is(a, b);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+    if (Number.isInteger(a) && Number.isInteger(b)) scale = 0;
+    return Math.abs(a - b) <= 1e-9 * Math.max(Math.abs(a), Math.abs(b), scale);
   }
   if (typeof a === "bigint" || typeof b === "bigint") {
     try {
@@ -890,7 +894,11 @@ function same(a, b) {
     }
   }
   const seq = (x) => Array.isArray(x) || (ArrayBuffer.isView(x) && !(x instanceof DataView));
-  if (seq(a) && seq(b)) return a.length === b.length && Array.from(a).every((x, i) => same(x, b[i]));
+  if (seq(a) && seq(b)) {
+    let big = 0;
+    for (const x of a) if (typeof x === "number" && Number.isFinite(x)) big = Math.max(big, Math.abs(x));
+    return a.length === b.length && Array.from(a).every((x, i) => same(x, b[i], big));
+  }
   if (a instanceof Set && b instanceof Set) return a.size === b.size && [...a].every((x) => b.has(x));
   if (a instanceof Map && b instanceof Map) return a.size === b.size && [...a].every(([k, x]) => b.has(k) && same(x, b.get(k)));
   if (a && b && typeof a === "object" && typeof b === "object") {

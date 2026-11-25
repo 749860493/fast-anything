@@ -63,13 +63,19 @@ module FastAnything
     end
   end
 
-  def same(a, b)
+  # Floats match within 1e-9 of their size, or of scale (the largest number in the expected Array
+  # holding them). -0.0 isn't 0.0: it prints differently.
+  def same(a, b, scale = 0.0)
     if a.is_a?(Float) || b.is_a?(Float)
       return false unless a.is_a?(Float) && b.is_a?(Float)
       return a.nan? && b.nan? if a.nan? || b.nan?
-      return a == b || (a - b).abs <= [1e-12, 1e-9 * [a.abs, b.abs].max].max
+      return 1.0 / a == 1.0 / b if a == b
+      return a.finite? && b.finite? && (a - b).abs <= 1e-9 * [a.abs, b.abs, scale].max
     end
-    return a.length == b.length && a.zip(b).all? { |x, y| same(x, y) } if a.is_a?(Array) && b.is_a?(Array)
+    if a.is_a?(Array) && b.is_a?(Array)
+      big = [a.grep(Numeric).map(&:abs).select { |x| x < Float::INFINITY }.max || 0, Float::MAX].min.to_f
+      return a.length == b.length && a.zip(b).all? { |x, y| same(x, y, big) }
+    end
     return a.keys.sort == b.keys.sort && a.all? { |k, x| same(x, b[k]) } if a.is_a?(Hash) && b.is_a?(Hash)
 
     a.class == b.class && a == b
