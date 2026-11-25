@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.8
+
+- `bench`: rounds with an A/A control (the original against itself), a faster/slower/noise verdict, and CPU time next to wall time (#138).
+- `verify`: floats compare relative to their size (or their array's largest value), and -0.0 isn't 0.0 (#139).
+- `port`: every 5th recorded call is held out from the agent, so a port can't special-case the calls it was shown (#141).
+- C: the app calls the port through a typed entry point instead of JSON: no per-call JSON overhead, and NaN/infinity results come back as they are (#140).
+- Python: ports build without LTO like the other languages, 4–9× faster rebuilds (#137).
+- Go, C#, PHP: NaN and infinity pass between the app and the port (#130, #132, #134). Python: `Pool` workers' profiles and recordings are no longer lost (#128).
+- `bench` refuses to run with no ports enabled; the report says "slower" when the app got slower; `doctor` exits 0 when scanning works without Rust (#142).
+
+Thanks @Butterski, @mohitmishra786 and @JuggyBob.
+
 ## 0.8.7
 
 - Go: variadic functions (#111), functions returning `(T, error)` (#107), and functions next to `main()` (#103) can be ported.
