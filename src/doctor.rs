@@ -168,8 +168,12 @@ pub fn run() -> Result<()> {
         "install Python, Node.js (or Bun, Deno), Ruby, Java, Go, PHP, .NET, R or a C compiler"
     );
     ui::ok("ready to scan");
-    ensure!(usable(&checks[0]), "Rust 1.85 or newer is needed to port, verify and enable");
-    ui::ok("ready to port");
+    // scanning works without Rust, so a missing toolchain only warns (#142)
+    if usable(&checks[0]) {
+        ui::ok("ready to port");
+    } else {
+        ui::warn("Rust 1.85 or newer is needed to port, verify and enable: https://rustup.rs");
+    }
     Ok(())
 }
 

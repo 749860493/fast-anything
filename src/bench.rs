@@ -399,9 +399,10 @@ pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
     let (exe, args) = ctx.state.lang.bench_command(ctx)?;
     let (exe, args) = (exe.as_str(), args.as_slice());
     let ports: Vec<String> = ctx.state.ports.values().filter(|p| p.enabled).map(|p| p.id.clone()).collect();
-    if ports.is_empty() {
-        ui::warn("no ports are enabled yet, so before and after are the same code");
-    }
+    ensure!(
+        !ports.is_empty(),
+        "no ports are enabled, so there is nothing to compare: port, verify and enable one first (fast-anything go)"
+    );
     ui::step(format!(
         "timing {} ({runs} rounds of {} twice and Rust once, rotated)",
         ui::bold(ctx.state.command.join(" ")),

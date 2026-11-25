@@ -27,8 +27,13 @@ fn port_line(p: &Port) -> String {
     }
 }
 
+/// "8.0×" and "faster", or "1.1×" and "slower" when the app got slower (#142).
+fn headline(speedup: f64) -> (String, &'static str) {
+    if speedup >= 1.0 { (times(speedup), "faster") } else { (times(1.0 / speedup.max(1e-12)), "slower") }
+}
+
 pub fn svg(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
-    let headline = times(b.speedup);
+    let (headline, word) = headline(b.speedup);
     let after_w = (300.0 * b.after.median / b.before.median.max(1e-12)).clamp(4.0, 300.0);
     let mut detail = ports.iter().take(2).map(|p| port_line(p)).collect::<Vec<_>>().join("   ");
     // the card's detail line holds about 95 characters
@@ -40,12 +45,12 @@ pub fn svg(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
     let sans = "system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif";
     let mono = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="760" height="220" viewBox="0 0 760 220" role="img" aria-label="{project}: {headline} faster">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="760" height="220" viewBox="0 0 760 220" role="img" aria-label="{project}: {headline} {word}">
   <rect width="760" height="220" rx="16" fill="#0d1117"/>
   <rect x="0.5" y="0.5" width="759" height="219" rx="15.5" fill="none" stroke="#30363d"/>
   <text x="32" y="44" font-family="{mono}" font-size="14" fill="#f74c00">⚡ fast-anything</text>
   <text x="32" y="78" font-family="{sans}" font-size="20" fill="#e6edf3">{project}</text>
-  <text x="32" y="148" font-family="{sans}" font-size="64" font-weight="800" fill="#f74c00">{headline}<tspan dx="12" font-size="28" font-weight="600" fill="#e6edf3">faster</tspan></text>
+  <text x="32" y="148" font-family="{sans}" font-size="64" font-weight="800" fill="#f74c00">{headline}<tspan dx="12" font-size="28" font-weight="600" fill="#e6edf3">{word}</tspan></text>
   <text x="420" y="92" font-family="{sans}" font-size="13" fill="#8b949e">{original}</text>
   <text x="720" y="92" font-family="{mono}" font-size="13" fill="#e6edf3" text-anchor="end">{before}</text>
   <rect x="420" y="100" width="300" height="16" rx="4" fill="#30363d"/>
@@ -75,9 +80,9 @@ pub fn markdown(project: &str, b: &BenchResult, ports: &[&Port]) -> String {
     } else {
         format!("median of {} runs each, original and Rust interleaved", b.runs)
     };
+    let (head, word) = headline(b.speedup);
     let mut md = format!(
-        "# ⚡ {project}: {} faster\n\n`{}` went from **{}** to **{}** ({how}).\n\n",
-        times(b.speedup),
+        "# ⚡ {project}: {head} {word}\n\n`{}` went from **{}** to **{}** ({how}).\n\n",
         b.command.join(" "),
         secs(b.before.median),
         secs(b.after.median),
@@ -142,6 +147,19 @@ mod tests {
         assert!(card.contains("a&lt;b&gt;&amp;c"));
         assert!(card.contains("8.0×"));
         assert!(card.contains(r#"width="37.5""#));
+    }
+
+    #[test]
+    fn a_slower_app_is_called_slower() {
+        let b = BenchResult {
+            before: Stats { median: 8.42, ..Stats::default() },
+            after: Stats { median: 9.27, ..Stats::default() },
+            speedup: 8.42 / 9.27,
+            ..BenchResult::default()
+        };
+        let (md, card) = (markdown("app", &b, &[]), svg("app", &b, &[]));
+        assert!(md.starts_with("# ⚡ app: 1.1× slower"), "{md}");
+        assert!(card.contains(">slower</tspan>") && !card.contains("faster"), "{card}");
     }
 
     #[test]

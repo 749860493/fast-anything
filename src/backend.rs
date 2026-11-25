@@ -430,7 +430,7 @@ pub fn build(ctx: &Ctx, port: &Port) -> Result<std::result::Result<PathBuf, Stri
     if port.lang == Lang::Python {
         cmd.env("PYO3_PYTHON", exe);
     }
-    let out = output(&mut cmd, "cargo (install Rust from https://rustup.rs)")?;
+    let out = output(&mut cmd, "cargo (install Rust from https://rustup.rs; scan works without it)")?;
     if !out.status.success() {
         return Ok(Err(compiler_errors(&String::from_utf8_lossy(&out.stderr))));
     }
