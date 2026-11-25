@@ -8,6 +8,7 @@ use crate::hotspot::{Hotspot, Param};
 use crate::native::{self, Flavor, Patches};
 use crate::python::DISABLE_ENV;
 use crate::state::{Ctx, Port, Verify};
+use crate::ui;
 use crate::util::{self, combined, output, tail};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -24,6 +25,7 @@ const REC_H: &str = include_str!("cfamily/rec.h");
 const REC_C: &str = include_str!("cfamily/rec.c");
 const REC_HPP: &str = include_str!("cfamily/rec.hpp");
 const JSON_HPP: &str = include_str!("cfamily/json.hpp");
+const TYPED_RS: &str = include_str!("cfamily/typed.rs");
 
 /// Intel oneAPI: icx (C, clang-based), icpx and dpcpp (C++). icx-cl takes MSVC-style flags, so it isn't listed.
 const C_COMPILERS: &[&str] = &["gcc", "clang", "cc", "icx"];
@@ -1243,12 +1245,294 @@ pub const FLAVOR_CPP: Flavor = Flavor {
     floats: None,
 };
 
-pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {
-    native::scaffold(ctx, hs, helpers, port, if port.lang == Lang::Cpp { &FLAVOR_CPP } else { &FLAVOR_C })
+fn flavor(port: &Port) -> &'static Flavor {
+    if port.lang == Lang::Cpp { &FLAVOR_CPP } else { &FLAVOR_C }
 }
 
+pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {
+    let task = native::scaffold(ctx, hs, helpers, port, flavor(port))?;
+    if port.lang == Lang::C {
+        fs::write(ctx.crate_dir(port).join("src").join("lib.rs"), glue(hs, port))?;
+    }
+    Ok(task)
+}
+
+/// src/lib.rs: the JSON entry point, plus for C the typed one the bridge calls.
+fn glue(hs: &Hotspot, port: &Port) -> String {
+    let f = flavor(port);
+    let json = native::glue_rs(hs, port, f.default_json, f.floats);
+    if port.lang == Lang::C { json + &typed_glue(hs).unwrap_or_default() } else { json }
+}
+
+/// A C crate whose glue predates fa_typed (or differs otherwise) gets it regenerated and rebuilt,
+/// so this replay checks what the bridge will call. Its sources changed, so enable asks for one
+/// more verify.
 pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
+    if port.lang == Lang::C
+        && let Some(hs) = ctx.state.hotspots.iter().find(|h| h.id == port.id)
+    {
+        let lib_rs = ctx.crate_dir(port).join("src").join("lib.rs");
+        let glue = glue(hs, port);
+        if fs::read_to_string(&lib_rs).is_ok_and(|t| t != glue) {
+            fs::write(&lib_rs, &glue)?;
+            ui::warn(format!(
+                "regenerated {}'s src/lib.rs (generated glue) so C calls skip JSON; verify again before enable",
+                port.id
+            ));
+            if let Err(log) = backend::build(ctx, port)? {
+                return Ok(Verify { built: false, build_log: Some(log), ..Verify::default() });
+            }
+        }
+    }
     native::verify(ctx, port, false)
+}
+
+// ------------------------------------------------------------------ the typed entry point
+
+/// One parameter of fa_typed, the entry point the C bridge calls (see cfamily/typed.rs).
+struct TypedParam {
+    /// Its type in fa_typed, and in the bridge's pointer to fa_typed.
+    rust: String,
+    c: String,
+    /// The port's argument, from a{i}.
+    port: String,
+    /// For verify: how a recorded argument is read, the C value it's held as, how that's passed.
+    read: String,
+    held: String,
+    pass: String,
+    /// In the bridge: the value passed, and what runs the C version instead (NaN, NULL).
+    arg: String,
+    check: String,
+}
+
+/// The Rust type of a `const T *` array's items; None for long double, which keeps JSON.
+fn ffi_item(t: &str) -> Option<&'static str> {
+    let t = squash(t).replace("std::", "");
+    let words: Vec<&str> = t.strip_suffix('*')?.split_whitespace().filter(|w| *w != "const").collect();
+    Some(match words.join(" ").as_str() {
+        "char" => "std::ffi::c_char",
+        "signed char" => "std::ffi::c_schar",
+        "unsigned char" => "std::ffi::c_uchar",
+        "short" | "short int" | "signed short" => "std::ffi::c_short",
+        "unsigned short" | "unsigned short int" => "std::ffi::c_ushort",
+        "int" | "signed" | "signed int" => "std::ffi::c_int",
+        "unsigned" | "unsigned int" => "std::ffi::c_uint",
+        "long" | "long int" => "std::ffi::c_long",
+        "unsigned long" | "unsigned long int" => "std::ffi::c_ulong",
+        "long long" | "long long int" => "std::ffi::c_longlong",
+        "unsigned long long" | "unsigned long long int" => "std::ffi::c_ulonglong",
+        "int8_t" => "i8",
+        "uint8_t" => "u8",
+        "int16_t" => "i16",
+        "uint16_t" => "u16",
+        "int32_t" => "i32",
+        "uint32_t" => "u32",
+        "int64_t" => "i64",
+        "uint64_t" => "u64",
+        "size_t" | "uintptr_t" => "usize",
+        "ssize_t" | "ptrdiff_t" | "intptr_t" => "isize",
+        "float" => "f32",
+        "double" => "f64",
+        "bool" | "_Bool" => "bool",
+        _ => return None,
+    })
+}
+
+/// What fa_typed returns through, in Rust and in C.
+fn typed_wide(ret: &str) -> (&'static str, &'static str) {
+    match c_suffix(ret) {
+        "u64" => ("u64", "unsigned long long"),
+        "i64" => ("i64", "long long"),
+        "f64" => ("f64", "double"),
+        _ => ("i32", "int"),
+    }
+}
+
+/// fa_typed's parameters; None where one keeps JSON (an array of long double).
+fn typed_params(hs: &Hotspot) -> Option<Vec<TypedParam>> {
+    let kinds = c_kinds(&hs.params).ok()?;
+    let mut out = Vec::new();
+    for (i, k) in kinds.iter().enumerate() {
+        let t = hs.params[i].annotation.clone().unwrap_or_default();
+        let n = &hs.params[i].name;
+        let int = |signed: bool| TypedParam {
+            rust: (if signed { "i64" } else { "u64" }).into(),
+            c: (if signed { "long long" } else { "unsigned long long" }).into(),
+            port: format!("typed_arg({i}, a{i}.into_deserializer())?"),
+            read: (if signed { "Value::as_i64" } else { "Value::as_u64" }).into(),
+            held: (if signed { "i64" } else { "u64" }).into(),
+            pass: format!("x.{i}"),
+            arg: format!("({}) ({n})", if signed { "long long" } else { "unsigned long long" }),
+            check: String::new(),
+        };
+        out.push(match k {
+            CKind::Scalar(Scalar::Int { signed, .. }) => int(*signed),
+            CKind::Len => int(!matches!(scalar(&t), Some(Scalar::Int { signed: false, .. }))),
+            CKind::Scalar(Scalar::Float(_)) => TypedParam {
+                rust: "f64".into(),
+                c: "double".into(),
+                port: format!("typed_arg({i}, a{i}.into_deserializer())?"),
+                read: "Value::as_f64".into(),
+                held: "f64".into(),
+                pass: format!("x.{i}"),
+                arg: format!("(double) ({n})"),
+                check: format!("    if (!isfinite({n})) return 0;\n"),
+            },
+            CKind::Scalar(Scalar::Bool) => TypedParam {
+                rust: "i32".into(),
+                c: "int".into(),
+                port: format!("typed_arg({i}, (a{i} != 0).into_deserializer())?"),
+                read: "|v| typed_bool(v).map(i32::from)".into(),
+                held: "i32".into(),
+                pass: format!("x.{i}"),
+                arg: format!("({n}) ? 1 : 0"),
+                check: String::new(),
+            },
+            CKind::Str => TypedParam {
+                rust: "*const std::ffi::c_char".into(),
+                c: "const char *".into(),
+                port: format!("typed_arg({i}, unsafe {{ typed_str({i}, a{i}) }}?.into_deserializer())?"),
+                read: "typed_cstring".into(),
+                held: "Option<std::ffi::CString>".into(),
+                pass: format!("typed_ptr(&x.{i})"),
+                arg: n.clone(),
+                check: format!("    if (!{n}) return 0;\n"),
+            },
+            CKind::Array(s, len) => {
+                let item = ffi_item(&t)?;
+                let (wide, read) = match s {
+                    Scalar::Int { signed: true, .. } => (".map(|&x| x as i64)", format!("typed_int::<{item}>")),
+                    Scalar::Int { signed: false, .. } => (".map(|&x| x as u64)", format!("typed_uint::<{item}>")),
+                    Scalar::Float(_) if item == "f32" => (".map(|&x| f64::from(x))", "typed_f32".into()),
+                    Scalar::Float(_) => (".copied()", "Value::as_f64".into()),
+                    Scalar::Bool => (".copied()", "typed_bool".into()),
+                };
+                let l = &hs.params[*len].name;
+                let lt = match scalar(hs.params[*len].annotation.as_deref().unwrap_or("")) {
+                    Some(Scalar::Int { signed: false, .. }) => "unsigned long long",
+                    _ => "long long",
+                };
+                TypedParam {
+                    rust: format!("*const {item}"),
+                    c: t.clone(),
+                    port: format!("typed_items({i}, unsafe {{ typed_slice({i}, a{i}, a{len}) }}?.iter(){wide})?"),
+                    read: format!("|v| typed_vec(v, {read})"),
+                    held: format!("Vec<{item}>"),
+                    pass: format!("x.{i}.as_ptr()"),
+                    arg: n.clone(),
+                    check: if matches!(s, Scalar::Float(_)) {
+                        format!(
+                            "    if ({n}) for ({lt} fa_i = 0; fa_i < ({lt}) ({l}); fa_i++) if (!isfinite({n}[fa_i])) return 0;\n"
+                        )
+                    } else {
+                        String::new()
+                    },
+                }
+            }
+        });
+    }
+    Some(out)
+}
+
+/// fa_typed and what verify needs to replay and time it, for src/lib.rs.
+fn typed_glue(hs: &Hotspot) -> Option<String> {
+    let ps = typed_params(hs)?;
+    let (wide, _) = typed_wide(hs.returns.as_deref().unwrap_or(""));
+    let list = |f: &dyn Fn(usize, &TypedParam) -> String| -> String {
+        ps.iter().enumerate().map(|(i, p)| f(i, p)).collect::<Vec<_>>().join(", ")
+    };
+    let fits: String = c_kinds(&hs.params)
+        .ok()?
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| match k {
+            CKind::Array(_, len) => Some(format!("    typed_fits({len}, x.{len}, x.{i}.len())?;\n")),
+            _ => None,
+        })
+        .collect();
+    Some(format!(
+        r#"
+// ------------------------------------------------------------------ the C bridge's entry point
+
+use serde::de::IntoDeserializer;
+
+#[allow(dead_code)]
+mod typed {{
+{template}}}
+use typed::*;
+
+type TypedFn = unsafe extern "C" fn(*mut {wide}, {types}) -> i32;
+
+/// The port called with fa_typed's arguments: the C return value, or why there is none.
+///
+/// # Safety
+/// As for fa_typed.
+unsafe fn typed({params}) -> Result<{wide}, String> {{
+    let result = port::{func}({port_args})?;
+    typed_ret(&result)
+}}
+
+/// 1 with the result in *out, 0 when the port doesn't answer (the C version runs then).
+///
+/// # Safety
+/// out must be writable, strings NUL-terminated and arrays as long as their length says.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fa_typed(out: *mut {wide}, {params}) -> i32 {{
+    match std::panic::catch_unwind(|| unsafe {{ typed({names}) }}) {{
+        Ok(Ok(r)) => {{
+            unsafe {{ *out = r }};
+            1
+        }}
+        _ => 0,
+    }}
+}}
+
+/// A recorded call's arguments, held as the C bridge passes them.
+struct TypedArgs({held});
+
+fn typed_args(a: &[Value]) -> Result<TypedArgs, String> {{
+    let x = TypedArgs({reads});
+{fits}    Ok(x)
+}}
+
+/// fa_call, through the C values: what verify replays.
+///
+/// # Safety
+/// input must point to len readable bytes and out_len to a writable usize.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fa_call_typed(input: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {{
+    let call = |a: &[Value]| {{
+        let x = typed_args(a)?;
+        unsafe {{ typed({passes}) }}.map(TypedWide::json)
+    }};
+    unsafe {{ typed_call(input, len, out_len, call) }}
+}}
+
+/// Nanoseconds per call of fa_typed, called as the C bridge calls it, over the recorded inputs.
+///
+/// # Safety
+/// input must point to len readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fa_time_typed(input: *const u8, len: usize, budget: f64) -> f64 {{
+    let f = std::hint::black_box(fa_typed as TypedFn);
+    let run = |x: &TypedArgs| {{
+        let mut out = {wide}::default();
+        let answered = unsafe {{ f(&mut out, {passes}) }};
+        (answered, out)
+    }};
+    unsafe {{ typed_time(input, len, budget, typed_args, run) }}
+}}
+"#,
+        template = TYPED_RS,
+        types = list(&|_, p| p.rust.clone()),
+        params = list(&|i, p| format!("a{i}: {}", p.rust)),
+        func = native::snake(&hs.name),
+        port_args = list(&|_, p| p.port.clone()),
+        names = list(&|i, _| format!("a{i}")),
+        held = list(&|_, p| p.held.clone()),
+        reads = list(&|i, p| format!("typed_json(a, {i}, {})?", p.read)),
+        passes = list(&|_, p| p.pass.clone()),
+    ))
 }
 
 // ------------------------------------------------------------------ the bridge
@@ -1271,7 +1555,50 @@ fn param_list(hs: &Hotspot) -> String {
 
 const LOADER: &str = "#ifdef _WIN32\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#define FA_OPEN(p) ((void *) LoadLibraryA(p))\n#define FA_SYM(l, n) ((void *) GetProcAddress((HMODULE) (l), n))\n#else\n#include <dlfcn.h>\n#define FA_OPEN(p) dlopen(p, RTLD_NOW | RTLD_LOCAL)\n#define FA_SYM(l, n) dlsym(l, n)\n#endif";
 
+/// The C bridge for a function fa_typed takes: its arguments go to the port as they are.
+fn c_typed_bridge(hs: &Hotspot, ps: &[TypedParam], s: &str, lib: &str) -> String {
+    let ret = hs.returns.clone().unwrap_or_default();
+    let (_, wide) = typed_wide(&ret);
+    format!(
+        r#"/* Calls the verified Rust port of {id}. FAST_ANYTHING_DISABLE=1 runs the C version instead. */
+#include <math.h>
+#include <stdlib.h>
+{loader}
+static int (*fa_typed_{s})({wide} *{types});
+int fa_on_{s}(void) {{
+    static int state = -1;
+    if (state < 0) {{
+        void *lib = getenv("FAST_ANYTHING_DISABLE") ? NULL : FA_OPEN({lib});
+        state = 0;
+        if (lib) {{
+            *(void **) &fa_typed_{s} = FA_SYM(lib, "fa_typed");
+            state = fa_typed_{s} != NULL;
+        }}
+    }}
+    return state;
+}}
+/* Sets *fa_ok to 0 (and the C version runs) if the port can't answer. */
+{ret} fa_fast_{s}(int *fa_ok, {params}) {{
+    {wide} fa_r = 0;
+    *fa_ok = 0;
+{checks}    *fa_ok = fa_typed_{s}(&fa_r{args});
+    return ({ret}) fa_r;
+}}"#,
+        id = hs.id,
+        loader = LOADER,
+        types = ps.iter().map(|p| format!(", {}", p.c)).collect::<String>(),
+        params = param_list(hs),
+        checks = ps.iter().map(|p| p.check.as_str()).collect::<String>(),
+        args = ps.iter().map(|p| format!(", {}", p.arg)).collect::<String>(),
+    )
+}
+
+/// The block appended to the C file: typed (see typed_params), or JSON in and out for an array of
+/// long double.
 fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
+    if let Some(ps) = typed_params(hs) {
+        return Ok(c_typed_bridge(hs, &ps, s, lib));
+    }
     let kinds = c_kinds(&hs.params).map_err(anyhow::Error::msg)?;
     let ret = hs.returns.clone().unwrap_or_default();
     let mut puts = String::new();
@@ -1668,10 +1995,15 @@ mod tests {
 
     #[test]
     fn bridges_compile_whatever_the_parameters_are_called() {
-        // every name the bridges use for their own variables, as a parameter
-        let c = "long pick(const int *b, size_t n, const char *text, double out, int ok, long r, int fallback) {\n    return 0;\n}\n";
+        // every name the bridges use for their own variables, as a parameter; the typed C bridge
+        // without a warning, and the JSON one, for an array of long double
+        let c = "long pick(const int *b, size_t n, const char *text, double out, int ok, long r, int fallback, const float *state, unsigned lib) {\n    return 0;\n}\n";
+        let c_json =
+            "long double pick(const long double *b, int n, const char *text, float reply) {\n    return 0;\n}\n";
         let cpp = "long pick(const std::vector<int> &in, int n, const std::string &text, double p, int reply, int err, int ok, long out) {\n    return 0;\n}\n";
-        for (source, compilers, ext) in [(c, ["cc", "gcc", "clang"], "c"), (cpp, ["c++", "g++", "clang++"], "cpp")] {
+        let (c_compilers, cpp_compilers) = (["cc", "gcc", "clang"], ["c++", "g++", "clang++"]);
+        for (source, compilers, ext) in [(c, c_compilers, "c"), (c_json, c_compilers, "c"), (cpp, cpp_compilers, "cpp")]
+        {
             let Some(cc) = compilers.into_iter().find(|c| Command::new(c).arg("--version").output().is_ok()) else {
                 eprintln!("no {ext} compiler on PATH, skipping");
                 continue;
@@ -1689,12 +2021,16 @@ mod tests {
             } else {
                 cpp_bridge(&hs, "t", "\"lib.so\"", &[])
             };
+            assert!(ext == "cpp" || bridge.contains("\"fa_call\"") == (source == c_json), "{bridge}");
             let dir = std::env::temp_dir().join(format!("fa-bridge-names-{ext}-{}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join(format!("bridge.{ext}")), bridge).unwrap();
             let mut cmd = Command::new(cc);
             if ext == "cpp" {
                 cmd.arg("-std=c++17");
+            }
+            if source == c {
+                cmd.args(["-Wall", "-Wextra", "-Werror"]);
             }
             let out = cmd.args(["-c", &format!("bridge.{ext}"), "-o", "bridge.o"]).current_dir(&dir).output().unwrap();
             let _ = fs::remove_dir_all(&dir);
@@ -1759,5 +2095,195 @@ mod tests {
             (b.flags, b.sources, b.args),
             (vec!["-O2".to_string()], vec!["main.c".to_string()], vec!["x".to_string()])
         );
+    }
+
+    /// A C project in a temp folder: scanned, each (id, port.rs) ported and built, then all enabled.
+    /// None without a C compiler or cargo.
+    #[cfg(unix)]
+    fn enabled_c_project(tag: &str, files: &[(&str, &str)], ports: &[(&str, &str)]) -> Option<(PathBuf, &'static str)> {
+        let cc = ["cc", "gcc", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())?;
+        Command::new("cargo").arg("--version").output().ok()?;
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("fa-c-typed-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (name, text) in files {
+            fs::write(dir.join(name), text).unwrap();
+        }
+        let command = [cc, "-O2"].into_iter().chain(files.iter().map(|f| f.0)).map(String::from).collect();
+        crate::pipeline::scan(&dir, command, None).unwrap();
+        for (id, port_rs) in ports {
+            let out = crate::pipeline::port(&dir, Some(id), 200).unwrap();
+            fs::write(&out.lib_rs, port_rs).unwrap();
+            let ctx = Ctx::open(&dir).unwrap();
+            let built = backend::build(&ctx, &ctx.state.ports[*id]).unwrap();
+            assert!(built.is_ok(), "{id}: {built:?}");
+        }
+        for (id, _) in ports {
+            crate::pipeline::enable(&dir, Some(id), true).unwrap();
+        }
+        Some((dir, cc))
+    }
+
+    /// Builds the sources in dir and runs them; FAST_ANYTHING_DISABLE=1 with `disable`.
+    #[cfg(unix)]
+    fn run_c(dir: &Path, cc: &str, sources: &[&str], disable: bool) -> String {
+        let built = Command::new(cc).arg("-O2").args(sources).args(["-o", "app"]).current_dir(dir).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let mut cmd = Command::new(dir.join("app"));
+        if disable {
+            cmd.env(DISABLE_ENV, "1");
+        }
+        let ran = cmd.current_dir(dir).output().unwrap();
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).into_owned()
+    }
+
+    /// verify's replay of a built port, in this process.
+    #[cfg(unix)]
+    fn replay(dir: &Path, id: &str) -> Verify {
+        let ctx = Ctx::open(dir).unwrap();
+        let port = &ctx.state.ports[id];
+        let crate_dir = ctx.crate_dir(port);
+        let (_, lib) = port.lang.artifact(&port.ext);
+        let job = serde_json::json!({
+            "lib": ctx.lib_dir().join(lib), "cases": crate_dir.join("recordings.jsonl"),
+            "meta": crate_dir.join("recordings.meta.json"), "func": port.func, "out": crate_dir.join("verify.json"),
+        });
+        fs::write(crate_dir.join("job-verify.json"), job.to_string()).unwrap();
+        native::replay(&crate_dir.join("job-verify.json")).unwrap();
+        serde_json::from_str(&fs::read_to_string(crate_dir.join("verify.json")).unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nan_and_infinity_reach_the_c_app_as_they_are() {
+        let ranges = "/* Mean of [lo, hi) over w: NaN for an empty range (0/0), infinite for w == 0. */\ndouble weighted_mean(long long lo, long long hi, double w) {\n    double s = 0.0;\n    for (long long i = lo; i < hi; i++) s += (double) i;\n    return s / (double) (hi - lo) / w;\n}\n";
+        let main = "#include <math.h>\n#include <stdio.h>\ndouble weighted_mean(long long lo, long long hi, double w);\nint main(void) {\n    double total = 0.0;\n    int empty = 0, infinite = 0;\n    for (int k = 0; k < 4000; k++) {\n        long long lo = k * 37 % 1000, hi = lo + (k % 50) * 20;\n        double m = weighted_mean(lo, hi, (double) (k % 7));\n        if (isnan(m)) empty++;\n        else if (isinf(m)) infinite++;\n        else total += m;\n    }\n    printf(\"total %.3f, empty %d, infinite %d\\n\", total, empty, infinite);\n    return 0;\n}\n";
+        let port = "pub fn weighted_mean(lo: i64, hi: i64, w: f64) -> Result<f64, String> {\n    let n = hi - lo;\n    let s = if n > 0 { ((lo + hi - 1) * n / 2) as f64 } else { 0.0 };\n    Ok(s / n as f64 / w)\n}\n";
+        let Some((dir, cc)) =
+            enabled_c_project("nan", &[("ranges.c", ranges), ("main.c", main)], &[("ranges.weighted_mean", port)])
+        else {
+            eprintln!("no C compiler or cargo on PATH, skipping");
+            return;
+        };
+        // the port answers NaN and infinity itself, not the C version
+        let check = "#include <math.h>\n#include <stdio.h>\nint fa_on_S(void);\ndouble fa_fast_S(int *, long long lo, long long hi, double w);\nint main(void) {\n    int on = fa_on_S(), a = 0, b = 0;\n    double x = fa_fast_S(&a, 5, 5, 1.0), y = fa_fast_S(&b, 1, 4, 0.0);\n    printf(\"%d %d %d %d %d\\n\", on, a, isnan(x) != 0, b, isinf(y) != 0);\n    return 0;\n}\n";
+        fs::write(dir.join("check.c"), check.replace("_S", &format!("_{}", util::slug("ranges.weighted_mean"))))
+            .unwrap();
+        let original = run_c(&dir, cc, &["main.c", "ranges.c"], true);
+        let enabled = run_c(&dir, cc, &["main.c", "ranges.c"], false);
+        let checked = run_c(&dir, cc, &["check.c", "ranges.c"], false);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(original.contains("empty 80, infinite 560"), "{original}");
+        assert_eq!(enabled, original);
+        assert_eq!(checked, "1 1 1 1 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c_values_reach_the_port_as_typed_and_come_back_exact() {
+        let lib = "#include <stdbool.h>\n#include <stddef.h>\n#include <string.h>\n\nlong long mix(signed char a, unsigned short b, int c, unsigned int d, long e, const char *s, const long *xs, size_t n) {\n    long long t = a + b + c + (long long) d + e + (long long) strlen(s);\n    for (size_t i = 0; i < n; i++) t += xs[i] * (long long) (i + 1);\n    return t;\n}\n\nunsigned long long hash(const unsigned char *bs, int n, unsigned long long seed) {\n    unsigned long long h = seed;\n    for (int i = 0; i < n; i++) h = h * 1099511628211ULL ^ bs[i];\n    return h;\n}\n\ndouble scale(float g, const int *ys, unsigned n, double k) {\n    double t = g;\n    for (unsigned i = 0; i < n; i++) t += ys[i] * k;\n    return t;\n}\n\nbool longer(const char *s, short k, bool flip) {\n    return ((long) strlen(s) > k) != flip;\n}\n";
+        let main = "#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\nlong long mix(signed char a, unsigned short b, int c, unsigned int d, long e, const char *s, const long *xs, size_t n);\nunsigned long long hash(const unsigned char *bs, int n, unsigned long long seed);\ndouble scale(float g, const int *ys, unsigned n, double k);\nbool longer(const char *s, short k, bool flip);\nint main(void) {\n    const char *words[4] = {\"plain\", \"h\\xc3\\xa9llo\", \"\\xe6\\x97\\xa5\\xe6\\x9c\\xac\", \"\"};\n    long xs[16];\n    int ys[16];\n    unsigned char bs[16];\n    for (int i = 0; i < 16; i++) { xs[i] = i * 1000 - 7000; ys[i] = 3 - i; bs[i] = (unsigned char) (i * 37); }\n    long long a = 0;\n    unsigned long long h = 0;\n    double s = 0;\n    int l = 0;\n    for (int k = 0; k < 400; k++) {\n        a += mix((signed char) (k % 200 - 100), (unsigned short) (k * 160), k * -9000, 4000000000u - k, -k * 1000L, words[k % 4], xs, (size_t) (k % 16));\n        h ^= hash(bs, k % 16, 18446744073709551557ULL - k);\n        s += scale(k * 0.37f, ys, (unsigned) (k % 16), k * 0.001);\n        l += longer(words[k % 4], (short) (k % 8), k % 3 == 0);\n    }\n    printf(\"%lld %llu %.17g %d\\n\", a, h, s, l);\n    return 0;\n}\n";
+        let ports = [
+            (
+                "lib.mix",
+                "pub fn mix(a: i8, b: u16, c: i32, d: u32, e: i64, s: String, xs: Vec<i64>, _n: u64) -> Result<i64, String> {\n    let t = [a as i64, b as i64, c as i64, d as i64, e, s.len() as i64].iter().fold(0i64, |t, v| t.wrapping_add(*v));\n    Ok(xs.iter().enumerate().fold(t, |t, (i, x)| t.wrapping_add(x.wrapping_mul(i as i64 + 1))))\n}\n",
+            ),
+            (
+                "lib.hash",
+                "pub fn hash(bs: Vec<u8>, _n: i32, seed: u64) -> Result<u64, String> {\n    Ok(bs.iter().fold(seed, |h, &b| h.wrapping_mul(1099511628211) ^ b as u64))\n}\n",
+            ),
+            (
+                "lib.scale",
+                "pub fn scale(g: f32, ys: Vec<i32>, _n: u32, k: f64) -> Result<f64, String> {\n    Ok(ys.iter().fold(g as f64, |t, &y| t + y as f64 * k))\n}\n",
+            ),
+            (
+                "lib.longer",
+                "pub fn longer(s: String, k: i16, flip: bool) -> Result<bool, String> {\n    Ok((s.len() as i64 > k as i64) != flip)\n}\n",
+            ),
+        ];
+        let Some((dir, cc)) = enabled_c_project("typed", &[("lib.c", lib), ("main.c", main)], &ports) else {
+            eprintln!("no C compiler or cargo on PATH, skipping");
+            return;
+        };
+        // verify replays the recorded calls through the same C values
+        let verified: Vec<(&str, usize, usize)> = ports
+            .iter()
+            .map(|(id, _)| {
+                let v = replay(&dir, id);
+                (*id, v.passed, v.total)
+            })
+            .collect();
+        let check = "#include <math.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\nint fa_on_M(void);\nint fa_on_H(void);\nint fa_on_C(void);\nint fa_on_L(void);\nlong long fa_fast_M(int *, signed char a, unsigned short b, int c, unsigned int d, long e, const char *s, const long *xs, size_t n);\nunsigned long long fa_fast_H(int *, const unsigned char *bs, int n, unsigned long long seed);\ndouble fa_fast_C(int *, float g, const int *ys, unsigned n, double k);\nbool fa_fast_L(int *, const char *s, short k, bool flip);\nint main(void) {\n    long xs[3] = {5, -6, 7};\n    int ys[2] = {3, -4};\n    unsigned char bs[4] = {1, 200, 3, 255};\n    int ok[7];\n    int on = fa_on_M() + fa_on_H() + fa_on_C() + fa_on_L();\n    long long r1 = fa_fast_M(&ok[0], -5, 65000, -70000, 4000000000u, -900000L, \"h\\xc3\\xa9llo \\xe6\\x97\\xa5\", xs, 3);\n    unsigned long long r2 = fa_fast_H(&ok[1], bs, 4, 18446744073709551557ULL);\n    double r3 = fa_fast_C(&ok[2], 1.5f, ys, 2, 0.25);\n    bool r4 = fa_fast_L(&ok[3], \"\\xc3\\xa9\\xc3\\xa9\", 3, true);\n    bool r5 = fa_fast_L(&ok[4], \"ab\", 1, false);\n    /* the C version answers these: NaN and NULL never reach the port */\n    fa_fast_C(&ok[5], NAN, ys, 2, 0.25);\n    fa_fast_L(&ok[6], NULL, 1, false);\n    printf(\"%d %lld %llu %.17g %d %d\", on, r1, r2, r3, (int) r4, (int) r5);\n    for (int i = 0; i < 7; i++) printf(\" %d\", ok[i]);\n    printf(\"\\n\");\n    return 0;\n}\n";
+        let check = [("_M(", "lib.mix"), ("_H(", "lib.hash"), ("_C(", "lib.scale"), ("_L(", "lib.longer")]
+            .iter()
+            .fold(check.to_string(), |c, (from, id)| c.replace(from, &format!("_{}(", util::slug(id))));
+        fs::write(dir.join("check.c"), check).unwrap();
+        let original = run_c(&dir, cc, &["main.c", "lib.c"], true);
+        let enabled = run_c(&dir, cc, &["main.c", "lib.c"], false);
+        let checked = run_c(&dir, cc, &["check.c", "lib.c"], false);
+        let _ = fs::remove_dir_all(&dir);
+        for (id, passed, total) in verified {
+            assert!(total > 0 && passed == total, "{id}: {passed} of {total} recorded calls match");
+        }
+        assert_eq!(enabled, original);
+        let r1 = -5i64 + 65000 - 70000 + 4000000000 - 900000 + "h\u{e9}llo \u{65e5}".len() as i64 + 5 - 6 * 2 + 7 * 3;
+        let r2 =
+            [1u8, 200, 3, 255].iter().fold(18446744073709551557u64, |h, &b| h.wrapping_mul(1099511628211) ^ b as u64);
+        assert_eq!(checked, format!("4 {r1} {r2} 1.25 0 1 1 1 1 1 1 0 0\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_times_the_call_the_c_app_makes() {
+        let geo = "/* Squared distance between two points. */\ndouble dist2(double x1, double y1, double x2, double y2) {\n    double dx = x1 - x2, dy = y1 - y2;\n    return dx * dx + dy * dy;\n}\n";
+        let main = "#include <stdio.h>\ndouble dist2(double x1, double y1, double x2, double y2);\nint main(void) {\n    double acc = 0.0;\n    for (int i = 0; i < 200000; i++) {\n        double t = i * 1e-5;\n        acc += dist2(t, 1.0 - t, 0.5, 0.25);\n    }\n    printf(\"%.6f\\n\", acc);\n    return 0;\n}\n";
+        let port = "pub fn dist2(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<f64, String> {\n    let (dx, dy) = (x1 - x2, y1 - y2);\n    Ok(dx * dx + dy * dy)\n}\n";
+        let Some((dir, _)) = enabled_c_project("time", &[("geo.c", geo), ("main.c", main)], &[("geo.dist2", port)])
+        else {
+            eprintln!("no C compiler or cargo on PATH, skipping");
+            return;
+        };
+        let v = replay(&dir, "geo.dist2");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(v.total > 0 && v.passed == v.total, "{v:?}");
+        // both sides timed per call: within 3x of the original (through JSON it was 22x slower)
+        let m = v.micro.expect("timed");
+        assert!(m.rust_ns > 0.0 && m.rust_ns < 3.0 * m.original_ns, "{m:?}");
+    }
+
+    /// The typed glue generated into every C port, compiled here as it is there.
+    #[allow(dead_code)]
+    mod typed_glue {
+        include!("cfamily/typed.rs");
+
+        #[test]
+        fn c_values_convert_like_json_and_results_take_one_number_or_bool() {
+            assert_eq!(typed_arg::<i8, _>(0, 100i64.into_deserializer()), Ok(100));
+            assert!(typed_arg::<i8, _>(1, 300i64.into_deserializer()).unwrap_err().starts_with("argument 2: "));
+            assert_eq!(typed_arg::<f32, _>(0, 0.1f64.into_deserializer()), Ok(0.1f32));
+            assert_eq!(typed_arg::<String, _>(0, "h\u{e9}".into_deserializer()), Ok("h\u{e9}".to_string()));
+            assert_eq!(typed_items::<Vec<u16>, _>(0, [1u64, 2].into_iter()), Ok(vec![1, 2]));
+            assert!(typed_items::<[i32; 3], _>(0, [1i64, 2].into_iter()).is_err());
+            let bad = c"\xff";
+            assert!(
+                unsafe { typed_str(0, bad.as_ptr()) }.is_err() && unsafe { typed_str(0, std::ptr::null()) }.is_err()
+            );
+            assert!(unsafe { typed_slice::<i32>(0, std::ptr::null(), 2u64) }.is_err());
+            assert_eq!(unsafe { typed_slice::<i32>(0, std::ptr::null(), 0i64) }, Ok(&[][..]));
+            assert!(unsafe { typed_slice::<i32>(0, [1].as_ptr(), -1i64) }.is_err());
+            assert_eq!(typed_ret::<i64, _>(&-7i32), Ok(-7));
+            assert_eq!(typed_ret::<i64, _>(&u64::MAX), Ok(i64::MAX));
+            assert_eq!(typed_ret::<i64, _>(&-2.9f64), Ok(-2));
+            assert_eq!(typed_ret::<u64, _>(&u64::MAX), Ok(u64::MAX));
+            assert!(typed_ret::<f64, _>(&f64::NAN).unwrap().is_nan());
+            assert_eq!(typed_ret::<f64, _>(&f32::NEG_INFINITY), Ok(f64::NEG_INFINITY));
+            assert_eq!(typed_ret::<f64, _>(&Some(2.5f64)), Ok(2.5));
+            assert_eq!(typed_ret::<i32, _>(&true), Ok(1));
+            assert!(typed_ret::<f64, _>(&"text").is_err() && typed_ret::<f64, _>(&None::<f64>).is_err());
+            assert!(typed_ret::<i64, _>(&vec![1]).is_err());
+            assert_eq!(1i32.json(), json!(true));
+            assert_eq!(f64::NAN.json(), Value::Null);
+        }
     }
 }

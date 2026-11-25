@@ -307,6 +307,7 @@ pub fn verify(ctx: &Ctx, port: &Port, loose_empty: bool) -> Result<Verify> {
 
 type FaCall = unsafe extern "C" fn(*const u8, usize, *mut usize) -> *mut u8;
 type FaFree = unsafe extern "C" fn(*mut u8, usize);
+type FaTime = unsafe extern "C" fn(*const u8, usize, f64) -> f64;
 
 fn show(v: &Value, limit: usize) -> String {
     let s = v.to_string();
@@ -316,11 +317,14 @@ fn show(v: &Value, limit: usize) -> String {
 /// The hidden  fast-anything __replay <job>  command.
 pub fn replay(job_path: &Path) -> Result<()> {
     let job: ReplayJob = serde_json::from_str(&fs::read_to_string(job_path)?).context("reading the replay job")?;
-    // SAFETY: the library is the port fast-anything just built; its two entry points have these signatures.
+    // SAFETY: the library is the port fast-anything just built; its entry points have these signatures.
     let lib =
         unsafe { libloading::Library::new(&job.lib) }.with_context(|| format!("loading {}", job.lib.display()))?;
-    let call: libloading::Symbol<FaCall> = unsafe { lib.get(b"fa_call") }.context("fa_call missing")?;
+    // C ports also take plain C values (see cfamily/typed.rs): replay and time that, as the app calls it
+    let call: libloading::Symbol<FaCall> =
+        unsafe { lib.get(b"fa_call_typed").or_else(|_| lib.get(b"fa_call")) }.context("fa_call missing")?;
     let free: libloading::Symbol<FaFree> = unsafe { lib.get(b"fa_free") }.context("fa_free missing")?;
+    let time: Option<libloading::Symbol<FaTime>> = unsafe { lib.get(b"fa_time_typed") }.ok();
     let invoke = |input: &[u8]| -> std::result::Result<Value, String> {
         let mut n = 0usize;
         let bytes = unsafe {
@@ -342,6 +346,7 @@ pub fn replay(job_path: &Path) -> Result<()> {
     let (mut passed, mut failed, mut derived, mut edges) = (0, 0, 0, 0);
     let mut failures = Vec::new();
     let mut inputs = Vec::new();
+    let mut typed_inputs = Vec::new();
     for (i, case) in cases.iter().enumerate() {
         let input = serde_json::to_vec(&case["args"])?;
         let is_derived = case.get("derived").is_some();
@@ -351,6 +356,7 @@ pub fn replay(job_path: &Path) -> Result<()> {
             edges += usize::from(is_edge);
         } else {
             inputs.push(input.clone());
+            typed_inputs.push(&case["args"]);
         }
         let got = invoke(&input);
         let (ok, expected) = match case.get("raises") {
@@ -397,19 +403,27 @@ pub fn replay(job_path: &Path) -> Result<()> {
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|m| m["original_ns"].as_f64());
     if let Some(original_ns) = original_ns.filter(|n| *n > 0.0 && failed == 0 && !inputs.is_empty()) {
-        {
-            let (mut best, mut spent, mut passes) = (f64::INFINITY, 0.0, 0);
-            while passes < 3 || (spent < job.budget && passes < 2000) {
-                let t = Instant::now();
-                for input in &inputs {
-                    let _ = std::hint::black_box(invoke(input));
-                }
-                let took = t.elapsed().as_secs_f64();
-                best = best.min(took);
-                spent += took;
-                passes += 1;
+        let rust_ns = match &time {
+            Some(time) => {
+                let all = serde_json::to_vec(&typed_inputs)?;
+                unsafe { time(all.as_ptr(), all.len(), job.budget) }
             }
-            let rust_ns = best / inputs.len() as f64 * 1e9;
+            None => {
+                let (mut best, mut spent, mut passes) = (f64::INFINITY, 0.0, 0);
+                while passes < 3 || (spent < job.budget && passes < 2000) {
+                    let t = Instant::now();
+                    for input in &inputs {
+                        let _ = std::hint::black_box(invoke(input));
+                    }
+                    let took = t.elapsed().as_secs_f64();
+                    best = best.min(took);
+                    spent += took;
+                    passes += 1;
+                }
+                best / inputs.len() as f64 * 1e9
+            }
+        };
+        if rust_ns >= 0.0 {
             v.micro =
                 Some(Micro { original_ns, rust_ns, speedup: if rust_ns > 0.0 { original_ns / rust_ns } else { 0.0 } });
         }
