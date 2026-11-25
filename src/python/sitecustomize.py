@@ -19,18 +19,30 @@ def _fast_anything_watch_workers():
         return
 
     def _bootstrap(self, *args, **kwargs):
+        state = None
         if os.name == "posix":
-            # Pool.terminate() (and with Pool(...) as p) ends workers with SIGTERM: exit normally
-            # instead, so the worker still leaves its results. Set first, before anything slow.
+            # Pool.terminate() (and with Pool(...) as p) ends workers with SIGTERM: write the
+            # worker's results first, then end it the way SIGTERM would have. Not by raising
+            # SystemExit: that can land in the finally below before the results are written, or
+            # be swallowed (a handler can run inside a __del__), leaving a worker that never exits.
+            # Set first, before anything slow.
             import signal
 
             def _on_term(*_):
                 # a second SIGTERM must not cut the worker off while it writes its results
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                sys.exit(0)
+                try:
+                    if state is not None:
+                        state.finish()
+                finally:
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    os.kill(os.getpid(), signal.SIGTERM)
 
             signal.signal(signal.SIGTERM, _on_term)
-        state = None
+            try:
+                _fast_anything_nudge_on_term(signal)
+            except Exception as e:  # never break the app's workers
+                sys.stderr.write("fast-anything: can't watch for SIGTERM: %r\n" % (e,))
         try:
             state = sys.modules.get("_fast_anything_state")
             if state is None:  # a fresh interpreter (spawn, forkserver): load the runner
@@ -54,6 +66,30 @@ def _fast_anything_watch_workers():
     multiprocessing.process.BaseProcess._bootstrap = _bootstrap
     if os.name == "nt":
         _fast_anything_graceful_pool_terminate()
+
+
+def _fast_anything_nudge_on_term(signal):
+    """A Python signal handler runs only when the main thread gets back to Python code. If SIGTERM
+    lands just before a blocking call starts (a worker waiting on the pool's queue lock, which
+    terminate() holds for good), the call never returns and the handler never runs. So the signal
+    also wakes a thread, which keeps sending SIGTERM to the main thread until the handler ends it."""
+    import threading
+    import time
+
+    r, w = os.pipe()
+    os.set_blocking(w, False)
+    signal.set_wakeup_fd(w, warn_on_full_buffer=False)  # an app's own wakeup fd replaces this one
+    main = threading.get_ident()
+
+    def nudge():
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})  # let the main thread take it
+        while signal.SIGTERM not in os.read(r, 64):
+            pass
+        while True:
+            time.sleep(0.1)
+            signal.pthread_kill(main, signal.SIGTERM)
+
+    threading.Thread(target=nudge, name="fast-anything-sigterm", daemon=True).start()
 
 
 def _fast_anything_graceful_pool_terminate():
