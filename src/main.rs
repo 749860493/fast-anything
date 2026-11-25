@@ -55,7 +55,7 @@ enum Cmd {
         /// Agent attempts per function before giving up
         #[arg(long, default_value_t = 3)]
         attempts: usize,
-        /// Benchmark runs
+        /// Benchmark rounds (each runs the original twice and Rust once)
         #[arg(long, default_value_t = 5)]
         runs: usize,
         /// Real calls to record per function
@@ -116,6 +116,7 @@ enum Cmd {
     },
     /// Time your app with the originals vs the Rust ports
     Bench {
+        /// Rounds: each runs the original twice (an A/A control for noise) and Rust once
         #[arg(long, default_value_t = 5)]
         runs: usize,
     },
