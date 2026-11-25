@@ -297,6 +297,106 @@ impl Lang {
     }
 }
 
+// ------------------------------------------------------------------ held-out calls
+
+/// Every 5th recorded call is held out.
+fn held(k: usize) -> bool {
+    k % 5 == 4
+}
+
+/// Move every 5th recorded call (derived and edge cases stay) from the crate's recordings to
+/// `holdout`, outside the crate folder: the agent writing the port never sees them, so a port that
+/// special-cases the calls it was shown fails verify. Fewer than 5 recorded calls hold none back.
+/// An .rds of the recorded calls beside the recordings (R) moves along whole: verify picks the
+/// held-out ones by position (see replay_order). Returns how many calls are held out.
+pub fn hold_out(recordings: &Path, holdout: &Path) -> Result<usize> {
+    let (rds, held_rds) = (recordings.with_extension("rds"), holdout.with_extension("rds"));
+    let _ = fs::remove_file(holdout);
+    let _ = fs::remove_file(&held_rds);
+    let text = fs::read_to_string(recordings).context("reading recordings.jsonl")?;
+    let lines: Vec<(&str, bool)> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| (l, serde_json::from_str::<serde_json::Value>(l).is_ok_and(|c| c.get("derived").is_none())))
+        .collect();
+    if lines.iter().filter(|(_, recorded)| *recorded).count() < 5 {
+        return Ok(0);
+    }
+    let (mut keep, mut out, mut k) = (String::new(), String::new(), 0);
+    for (line, recorded) in lines {
+        let into = if recorded && held(k) { &mut out } else { &mut keep };
+        into.push_str(line);
+        into.push('\n');
+        k += usize::from(recorded);
+    }
+    if let Some(dir) = holdout.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(holdout, &out)?;
+    fs::write(recordings, keep)?;
+    if rds.exists() {
+        fs::rename(&rds, &held_rds)?;
+    }
+    Ok(out.lines().count())
+}
+
+/// Positions of `recorded` calls in the order verify replays them: the visible ones, then the held-out ones.
+pub fn replay_order(recorded: usize) -> Vec<usize> {
+    let (visible, out): (Vec<usize>, Vec<usize>) = (0..recorded).partition(|&k| !held(k));
+    visible.into_iter().chain(out).collect()
+}
+
+/// What verify replays, and where the runner reports.
+pub struct Replay {
+    pub cases: PathBuf,
+    pub out: PathBuf,
+    pub held_out: usize,
+}
+
+/// Without held-out calls: the crate's recordings.jsonl and verify.json, as always. With them, both
+/// sit in .fast/verify/<port>/, outside the crate folder: the cases are recordings.jsonl followed by
+/// the held-out calls, and the report shows their values.
+pub fn replay(ctx: &Ctx, port: &Port) -> Result<Replay> {
+    let dir = ctx.crate_dir(port);
+    let held_out = ctx.held_out(port);
+    if held_out == 0 {
+        return Ok(Replay { cases: dir.join("recordings.jsonl"), out: dir.join("verify.json"), held_out });
+    }
+    let mut text = fs::read_to_string(dir.join("recordings.jsonl")).context("reading recordings.jsonl")?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&fs::read_to_string(ctx.holdout(port)).context("reading the held-out calls")?);
+    let verify_dir = ctx.fast.join("verify").join(dir.file_name().unwrap_or_default());
+    fs::create_dir_all(&verify_dir)?;
+    let cases = verify_dir.join("cases.jsonl");
+    fs::write(&cases, text)?;
+    Ok(Replay { cases, out: verify_dir.join("verify.json"), held_out })
+}
+
+/// Failures among the held-out calls (replayed right after the `visible` lines of recordings.jsonl)
+/// lose their values, so neither the output nor the agent's next prompt shows them.
+pub fn redact_held_out(v: &mut Verify, func: &str, visible: usize) {
+    for f in &mut v.failures {
+        if (visible..visible + v.held_out).contains(&f.case) {
+            f.call = format!("(held out) {func}(…)");
+            f.expected = "its recorded result".into();
+            f.got = "something else".into();
+        }
+    }
+}
+
+/// The TASK.md line about held-out calls, if there are any.
+pub fn held_out_note(held_out: usize) -> String {
+    match held_out {
+        0 => String::new(),
+        1 => "1 more recorded call is held out: verify checks it too and reports a mismatch there without the values.\n\n".into(),
+        n => format!(
+            "{n} more recorded calls are held out: verify checks them too and reports a mismatch there without the values.\n\n"
+        ),
+    }
+}
+
 /// Settings shared by every generated crate: tuned for the machine that builds it
 /// (.fast/lib is rebuilt per machine, never shipped), plus macOS extension linking.
 pub const CARGO_CONFIG: &str = "# Built for the machine that runs it: .fast/lib is rebuilt per machine, never shipped.\n\
@@ -491,5 +591,112 @@ mod tests {
         let bom_on = insert_marked(bom_main, "#", "m.f", "f = g", guard);
         assert!(bom_on.starts_with('\u{feff}'));
         assert_eq!(strip_marked(&bom_on, "#", "m.f"), bom_main);
+    }
+
+    fn call(k: usize) -> String {
+        format!("{{\"args\":[{k}],\"result\":{}}}", k * 1000 + 7)
+    }
+
+    #[test]
+    fn every_fifth_recorded_call_is_held_out() {
+        let dir = std::env::temp_dir().join(format!("fa-holdout-split-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (recordings, holdout) = (dir.join("recordings.jsonl"), dir.join("holdout/demo.jsonl"));
+        let mut lines: Vec<String> = (0..12).map(call).collect();
+        lines.insert(6, r#"{"args":[-1],"result":-1,"derived":"edge"}"#.into());
+        lines.push(r#"{"args":[0],"result":7,"derived":true}"#.into());
+        fs::write(&recordings, lines.join("\n") + "\n").unwrap();
+        fs::write(dir.join("recordings.rds"), "every recorded call").unwrap();
+
+        assert_eq!(hold_out(&recordings, &holdout).unwrap(), 2);
+        assert_eq!(fs::read_to_string(&holdout).unwrap(), format!("{}\n{}\n", call(4), call(9)));
+        let kept = fs::read_to_string(&recordings).unwrap();
+        assert_eq!(kept.lines().count(), 12, "10 recorded calls and both derived ones stay: {kept}");
+        assert!(kept.contains("\"derived\":\"edge\"") && kept.contains("\"derived\":true"));
+        assert!(!kept.contains(&call(4)) && !kept.contains(&call(9)));
+        assert!(!dir.join("recordings.rds").exists() && dir.join("holdout/demo.rds").exists(), "the .rds moves along");
+
+        // Porting again records afresh; fewer than 5 recorded calls hold none back.
+        let few: Vec<String> = (0..4).map(call).chain([r#"{"args":[0],"result":7,"derived":true}"#.into()]).collect();
+        fs::write(&recordings, few.join("\n") + "\n").unwrap();
+        assert_eq!(hold_out(&recordings, &holdout).unwrap(), 0);
+        assert!(!holdout.exists() && !dir.join("holdout/demo.rds").exists());
+        assert_eq!(fs::read_to_string(&recordings).unwrap(), few.join("\n") + "\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_replays_held_out_calls_after_the_visible_ones() {
+        assert_eq!(replay_order(12), [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 4, 9]);
+        assert_eq!(replay_order(4), [0, 1, 2, 3]);
+
+        let root = std::env::temp_dir().join(format!("fa-holdout-replay-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let ctx = Ctx::open(&root).unwrap();
+        let port = Port {
+            id: "app.f".into(),
+            file: "app.py".into(),
+            module: "app".into(),
+            func: "f".into(),
+            ext: "fa_app_f".into(),
+            crate_dir: ".fast/ports/app.f".into(),
+            recorded: 12,
+            calls_seen: 12,
+            verify: None,
+            enabled: false,
+            lang: Lang::Python,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        let dir = ctx.crate_dir(&port);
+        fs::create_dir_all(&dir).unwrap();
+        let recordings = dir.join("recordings.jsonl");
+        fs::write(&recordings, (0..12).map(call).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+
+        // A port from before holding out: the crate's own files, as always.
+        let replay0 = replay(&ctx, &port).unwrap();
+        assert_eq!((replay0.cases, replay0.out, replay0.held_out), (recordings.clone(), dir.join("verify.json"), 0));
+
+        hold_out(&recordings, &ctx.holdout(&port)).unwrap();
+        assert_eq!(ctx.held_out(&port), 2);
+        let r = replay(&ctx, &port).unwrap();
+        assert_eq!(r.held_out, 2);
+        assert!(
+            !r.cases.starts_with(&dir) && !r.out.starts_with(&dir),
+            "outside the crate folder: {}",
+            r.cases.display()
+        );
+        let merged: Vec<String> = fs::read_to_string(&r.cases).unwrap().lines().map(str::to_string).collect();
+        let want: Vec<String> = replay_order(12).into_iter().map(call).collect();
+        assert_eq!(merged, want, "visible calls first, then the held-out ones at 10 and 11");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn held_out_failures_lose_their_values() {
+        let failure = |case: usize, value: &str| crate::state::Failure {
+            case,
+            call: format!("f({value})"),
+            expected: value.into(),
+            got: "0".into(),
+        };
+        let mut v = Verify {
+            built: true,
+            total: 20,
+            held_out: 2,
+            derived: 8,
+            failed: 3,
+            failures: vec![failure(3, "3007"), failure(10, "4007"), failure(12, "9")],
+            ..Verify::default()
+        };
+        redact_held_out(&mut v, "f", 10);
+        assert_eq!(v.failures[0].call, "f(3007)", "a visible call keeps its values");
+        assert_eq!(v.failures[0].expected, "3007");
+        assert_eq!(v.failures[1].call, "(held out) f(…)");
+        assert!(!format!("{:?}", v.failures[1]).contains("4007"), "{:?}", v.failures[1]);
+        assert_eq!(v.failures[2].call, "f(9)", "derived cases come after the held-out ones");
     }
 }

@@ -118,21 +118,22 @@ pub fn verify(id: &str, v: &Verify) {
         return;
     }
     if v.ok() {
-        if v.derived > 0 {
+        if v.derived + v.held_out > 0 {
+            let mut parts = vec![format!("{} recorded", v.total - v.derived - v.held_out)];
+            if v.held_out > 0 {
+                parts.push(format!("{} held out", v.held_out));
+            }
+            if v.edges > 0 {
+                parts.push(format!("{} edge cases", v.edges));
+                parts.push(format!("{} derived", v.derived - v.edges));
+            } else if v.derived > 0 {
+                parts.push(format!("{} derived", v.derived));
+            }
             ui::ok(format!(
                 "{}/{} calls give the same result {}",
                 v.passed,
                 v.total,
-                dim(if v.edges > 0 {
-                    format!(
-                        "({} recorded + {} edge cases + {} derived)",
-                        v.total - v.derived,
-                        v.edges,
-                        v.derived - v.edges
-                    )
-                } else {
-                    format!("({} recorded + {} derived)", v.total - v.derived, v.derived)
-                })
+                dim(format!("({})", parts.join(" + ")))
             ));
         } else {
             ui::ok(format!("{}/{} recorded calls give the same result", v.passed, v.total));

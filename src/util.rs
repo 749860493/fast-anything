@@ -40,6 +40,11 @@ pub fn slug(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect()
 }
 
+/// Non-blank lines in a file, 0 if it can't be read.
+pub fn count_lines(path: &Path) -> usize {
+    std::fs::read_to_string(path).map(|t| t.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0)
+}
+
 pub fn output(cmd: &mut Command, what: &str) -> Result<Output> {
     cmd.output().with_context(|| format!("couldn't start {what} ({})", cmd.get_program().to_string_lossy()))
 }

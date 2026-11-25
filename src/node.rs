@@ -442,7 +442,7 @@ fn sample_calls(path: &Path, func: &str, n: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path) -> String {
+pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path, held_out: usize) -> String {
     let fence = "```";
     let lang =
         if hs.file.ends_with(".ts") || hs.file.ends_with(".mts") || hs.file.ends_with(".cts") { "ts" } else { "js" };
@@ -455,7 +455,7 @@ Write `{func}` in `src/lib.rs` so it behaves **exactly** like the JavaScript bel
 Only edit files in this folder. Don't touch the JavaScript project.\n\n\
 ## The original ({file}:{line})\n\n{fence}{lang}\n{source}\n{fence}\n\n\
 {helpers}## Real calls\n\n\
-fast-anything recorded {recorded} real calls (out of {seen} while the app ran). A few:\n\n{fence}\n{samples}\n{fence}\n\n\
+fast-anything recorded {recorded} real calls (out of {seen} while the app ran). A few:\n\n{fence}\n{samples}\n{fence}\n\n{held}\
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
 - JavaScript strings are UTF-16: `.length`, indexing and `charCodeAt` count UTF-16 code units. \
@@ -468,7 +468,7 @@ Use `s.encode_utf16()` for anything index- or length-based (bytes are fine after
 - Keep `#[napi(js_name = \"{func}\", catch_unwind)]` as it is.\n\
 {notes}\n\
 ## Check\n\n\
-Run `cargo check` here. Then fast-anything builds the crate in release mode and replays all {recorded} recorded calls against it\n\
+Run `cargo check` here. Then fast-anything builds the crate in release mode and replays all {total} recorded calls against it\n\
 (`fast-anything verify {id}`).\n",
         id = port.id,
         dir = crate_dir.display(),
@@ -476,7 +476,9 @@ Run `cargo check` here. Then fast-anything builds the crate in release mode and 
         file = hs.file,
         line = hs.line,
         source = hs.source,
-        recorded = port.recorded,
+        recorded = port.recorded.saturating_sub(held_out),
+        held = backend::held_out_note(held_out),
+        total = port.recorded,
         seen = crate::util::thousands(port.calls_seen),
         helpers = helpers_md(hs, helpers),
     )
@@ -493,7 +495,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
     if !lib.exists() {
         fs::write(&lib, lib_rs(hs, port))?;
     }
-    let task = task_md(hs, helpers, port, &dir);
+    let task = task_md(hs, helpers, port, &dir, ctx.held_out(port));
     fs::write(dir.join("TASK.md"), &task)?;
     Ok(task)
 }
@@ -515,11 +517,11 @@ pub fn helpers_md(hs: &Hotspot, helpers: &[Hotspot]) -> String {
 
 pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
     let node = ctx.runtime()?;
-    let dir = ctx.crate_dir(port);
-    let out = dir.join("verify.json");
+    let replay = backend::replay(ctx, port)?;
+    let out = replay.out;
     let job = json!({
         "addon": ctx.lib_dir().join(format!("{}.node", port.ext)), "js_name": port.func, "func": port.func,
-        "module_file": ctx.root.join(&port.file), "cases": dir.join("recordings.jsonl"), "out": out, "budget": 0.5,
+        "module_file": ctx.root.join(&port.file), "cases": replay.cases, "held_out": replay.held_out, "out": out, "budget": 0.5,
     });
     // The original may not be exported: a block appended for this run hands it to the runner from
     // inside the module, then the file goes back byte for byte.

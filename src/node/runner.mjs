@@ -1124,7 +1124,9 @@ async function verify(job) {
 
   const cases = readFileSync(job.cases, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
   const recorded = cases.length;
-  const derived = typeof original === "function" ? derive(original, cases, job.derive_budget ?? 3, job.derive_limit ?? 200) : [];
+  // held-out calls (at the end) only get replayed: shrinking them would show their values in failures
+  const visible = cases.slice(0, recorded - (job.held_out ?? 0));
+  const derived = typeof original === "function" ? derive(original, visible, job.derive_budget ?? 3, job.derive_limit ?? 200) : [];
   cases.push(...derived);
   const report = { total: cases.length, derived: derived.length, edges: derived.filter((c) => c.derived === "edge").length, passed: 0, failed: 0, failures: [] };
   const calls = [];

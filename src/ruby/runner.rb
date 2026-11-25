@@ -419,7 +419,9 @@ def cmd_verify(job, _argv)
 
   cases = File.readlines(job["cases"], chomp: true).reject(&:empty?).map { |l| JSON.parse(l) }
   recorded = cases.length
-  derived = derive(original, cases, job.fetch("derive_budget", 3.0), job.fetch("derive_limit", 200))
+  # held-out calls (at the end) only get replayed: shrinking them would show their values in failures
+  visible = cases.first(recorded - job.fetch("held_out", 0))
+  derived = derive(original, visible, job.fetch("derive_budget", 3.0), job.fetch("derive_limit", 200))
   cases += derived
   report = { "total" => cases.length, "derived" => derived.length, "edges" => derived.count { |c| c["derived"] == "edge" },
              "passed" => 0, "failed" => 0, "failures" => [] }

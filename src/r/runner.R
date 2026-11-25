@@ -192,6 +192,7 @@ if (mode == "verify") {
   original <- get(job$func, envir = env)
   port <- fa$.fa_port(job$lib, original)
   cases <- readRDS(job$cases)
+  if (!is.null(job$order)) cases <- cases[unlist(job$order)]  # held-out calls last
   recorded <- length(cases)
 
   derived <- list()
@@ -207,7 +208,8 @@ if (mode == "verify") {
     if (inherits(result, "error") || is.null(tryCatch(fa$.fa_json(result), error = function(e) NULL))) return(invisible())
     derived[[length(derived) + 1L]] <<- list(args = args, result = result, derived = kind)
   }
-  plain <- Filter(function(c) is.null(c$raises), cases)
+  # held-out calls (at the end) only get replayed: shrinking them would show their values in failures
+  plain <- Filter(function(c) is.null(c$raises), head(cases, recorded - job$held_out))
   for (case in head(plain, 20)) {
     base <- lapply(case$args, small)
     for (i in seq_along(base)) {

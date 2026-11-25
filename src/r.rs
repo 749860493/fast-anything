@@ -499,7 +499,7 @@ fn sample_calls(path: &Path, func: &str, n: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path) -> String {
+pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path, held_out: usize) -> String {
     let fence = "```";
     let samples = sample_calls(&crate_dir.join("recordings.jsonl"), &hs.name, 8).join("\n");
     let mut helper_md = String::new();
@@ -521,7 +521,7 @@ Only edit files in this folder. Don't touch the R project.\n\n\
 ## The original ({file}:{line})\n\n{fence}r\n{source}\n{fence}\n\n\
 {helper_md}\
 ## Real calls\n\n\
-fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON, in parameter order. A few:\n\n{fence}\n{samples}\n{fence}\n\n\
+fast-anything recorded {recorded} real calls (out of {seen} while the app ran). Arguments arrive as JSON, in parameter order. A few:\n\n{fence}\n{samples}\n{fence}\n\n{held}\
 ## How R values arrive and go back\n\n\
 - R has no scalars: a length-1 vector arrives as a plain value, a longer one as an array. Take vectors as `Vector<T>` (`crate::r::Vector`, accepts both; derefs to `Vec<T>`).\n\
 - Integer and double vectors both arrive as numbers; take `f64` (or `i64` when the R code only uses whole numbers). NA arrives as null: `Option<T>`.\n\
@@ -544,7 +544,8 @@ Run `cargo check` here. Then fast-anything builds the crate in release mode and 
         file = hs.file,
         line = hs.line,
         source = hs.source,
-        recorded = port.recorded,
+        recorded = port.recorded.saturating_sub(held_out),
+        held = backend::held_out_note(held_out),
         seen = crate::util::thousands(port.calls_seen),
     )
 }
@@ -563,7 +564,7 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
     if !body.exists() {
         fs::write(&body, port_rs(hs, port))?;
     }
-    let task = task_md(hs, helpers, port, &dir);
+    let task = task_md(hs, helpers, port, &dir, ctx.held_out(port));
     fs::write(dir.join("TASK.md"), &task)?;
     Ok(task)
 }
@@ -571,11 +572,23 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
 pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
     let rscript = ctx.runtime()?;
     let dir = ctx.crate_dir(port);
-    let out = dir.join("verify.json");
+    let replay = backend::replay(ctx, port)?;
+    let out = replay.out;
+    // With calls held out, the .rds of every recorded call sits next to them (see backend::hold_out):
+    // the runner takes them in replay order, held-out ones last.
+    let (cases, order) = if replay.held_out == 0 {
+        (dir.join("recordings.rds"), Value::Null)
+    } else {
+        let recorded = crate::util::count_lines(&dir.join("recordings.jsonl")) + replay.held_out;
+        (
+            ctx.holdout(port).with_extension("rds"),
+            json!(backend::replay_order(recorded).iter().map(|k| k + 1).collect::<Vec<_>>()),
+        )
+    };
     let (_, lib) = backend::Lang::R.artifact(&port.ext);
     let job = json!({
-        "root": ctx.root, "lib": ctx.lib_dir().join(lib), "func": port.func,
-        "module_file": ctx.root.join(&port.file), "cases": dir.join("recordings.rds"), "out": out, "budget": 0.5,
+        "root": ctx.root, "lib": ctx.lib_dir().join(lib), "func": port.func, "module_file": ctx.root.join(&port.file),
+        "cases": cases, "order": order, "held_out": replay.held_out, "out": out, "budget": 0.5,
     });
     runner(ctx, rscript, "verify", job)?;
     let mut v: Verify = serde_json::from_str(&fs::read_to_string(&out)?).context("reading verify results")?;

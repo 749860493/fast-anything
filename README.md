@@ -58,6 +58,8 @@ Or step by step:
 
 That port looked right but compared bytes instead of characters. 148 of 500 real calls caught it. On top of the recorded calls, fast-anything derives extra cases and lets the original answer them: edge cases (NaN, ±infinity, -0.0, zero and ±1, non-ASCII text, empty and up to 16× bigger inputs) and shrunk inputs (tiny and random slices). Nothing is enabled until every case matches: same values (floats within 1e-9 of their size or of the largest value in the same list, -0.0 not 0.0), errors where the original errors. A port that is right but slower per call than the original (calling into Rust costs more than the work saved) isn't enabled either. `FAST_ANYTHING_DISABLE=1` runs the original any time.
 
+Every 5th recorded call (from 5 calls up) is held out of the crate folder the agent works in: verify replays it too but reports a mismatch there without the values, so a port that special-cases the calls it was shown still fails.
+
 ## Results
 
 Real runs on an i5-10500, Windows 11 (C and C++: a 4-core GitHub Actions Linux runner). Reproduce them from [`examples/`](examples).

@@ -149,6 +149,7 @@ pub fn port(root: &Path, id: Option<&str>, samples: usize) -> Result<PortOut> {
         line: hs.line,
         sources: crate::state::verbatim(&text, &sources),
     };
+    backend::hold_out(&dir.join("recordings.jsonl"), &ctx.holdout(&port))?;
     let task = lang.scaffold(&ctx, &hs, &helpers, &port)?;
     ctx.state.ports.insert(port.id.clone(), port);
     ctx.save()?;
@@ -181,7 +182,11 @@ pub fn verify(root: &Path, id: Option<&str>) -> Result<(String, Verify)> {
                 port.recorded,
                 if port.recorded == 1 { "" } else { "s" }
             ));
-            port.lang.verify(&ctx, &port)?
+            let visible = util::count_lines(&ctx.crate_dir(&port).join("recordings.jsonl"));
+            let mut v = port.lang.verify(&ctx, &port)?;
+            v.held_out = ctx.held_out(&port);
+            backend::redact_held_out(&mut v, &port.func, visible);
+            v
         }
     };
     let mut v = v;
@@ -402,6 +407,11 @@ pub fn feedback(v: &Verify) -> String {
         for f in &v.failures {
             out.push_str(&format!("- `{}` should give `{}`, the port gave `{}`\n", f.call, f.expected, f.got));
         }
+        if v.failures.iter().any(|f| f.call.starts_with("(held out) ")) {
+            out.push_str(
+                "\nCalls marked (held out) aren't in recordings.jsonl: port the logic, not the calls you were shown.\n",
+            );
+        }
     }
     out.push_str(if v.lang.c_bridge() { "\nFix src/port.rs.\n" } else { "\nFix src/lib.rs.\n" });
     out
@@ -582,6 +592,29 @@ mod tests {
         );
         let wrong = Verify { failed: 1, ..v };
         assert!(feedback(&wrong).contains("failed"));
+    }
+
+    #[test]
+    fn feedback_never_shows_a_held_out_call() {
+        let failure = |case: usize, value: &str| crate::state::Failure {
+            case,
+            call: format!("f({value}, \"secret-{value}\")"),
+            expected: format!("{value}.25"),
+            got: format!("{value}.5"),
+        };
+        let mut v = Verify {
+            built: true,
+            total: 600,
+            held_out: 100,
+            failed: 2,
+            failures: vec![failure(7, "31"), failure(450, "8675309")],
+            ..Verify::default()
+        };
+        backend::redact_held_out(&mut v, "f", 400);
+        let text = feedback(&v);
+        assert!(text.contains("`(held out) f(…)`") && text.contains("port the logic"), "{text}");
+        assert!(!text.contains("8675309"), "{text}");
+        assert!(text.contains("f(31, \"secret-31\")") && text.contains("31.25"), "{text}");
     }
 
     fn project(name: &str) -> (PathBuf, Port) {
