@@ -207,20 +207,18 @@ pub fn verify(root: &Path, id: Option<&str>) -> Result<(String, Verify)> {
 }
 
 /// Verify every port; an enabled one that fails is switched back, as with a single verify.
-pub fn verify_all(root: &Path) -> Result<()> {
+pub fn verify_all(root: &Path) -> Result<Vec<(String, Verify)>> {
     let ids: Vec<String> = Ctx::open(root)?.state.ports.keys().cloned().collect();
     ensure!(!ids.is_empty(), "nothing ported yet: run  fast-anything port");
-    let mut failed = vec![];
+    let mut results = Vec::with_capacity(ids.len());
     for id in &ids {
         let (id, v) = verify(root, Some(id))?;
-        show::verify(&id, &v);
-        if !v.ok() {
-            failed.push(id);
+        if !ui::quiet() {
+            show::verify(&id, &v);
         }
+        results.push((id, v));
     }
-    ensure!(failed.is_empty(), "{} of {} ports don't match: {}", failed.len(), ids.len(), failed.join(", "));
-    ui::ok(format!("all {} ports match the original", ids.len()));
-    Ok(())
+    Ok(results)
 }
 
 /// What to do about a port whose original changed after it was recorded.
@@ -434,7 +432,9 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
         ui::step(format!("{} is writing the Rust port (attempt {attempt}/{attempts})", ui::bold(agent_spec)));
         agent::run(agent_spec, &dir, &prompt, &dir.join("agent.log"))?;
         let (_, v) = verify(root, Some(id))?;
-        show::verify(id, &v);
+        if !ui::quiet() {
+            show::verify(id, &v);
+        }
         if v.ok() && !v.slower() {
             return Ok(v);
         }

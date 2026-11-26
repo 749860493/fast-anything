@@ -2,6 +2,7 @@
 
 use crate::ui::{self, bold, dim, green, red, yellow};
 use anyhow::{Result, ensure};
+use serde::Serialize;
 use std::process::Command;
 
 fn version(program: &str, args: &[&str]) -> Option<String> {
@@ -53,6 +54,25 @@ fn problem(name: &str, found: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct Tool {
+    pub name: &'static str,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    pub need: &'static str,
+    pub hint: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Report {
+    pub ready_to_scan: bool,
+    pub ready_to_port: bool,
+    pub tools: Vec<Tool>,
+}
+
 struct Check {
     name: &'static str,
     found: Option<String>,
@@ -60,7 +80,15 @@ struct Check {
     hint: &'static str,
 }
 
-pub fn run() -> Result<()> {
+impl Check {
+    fn into_tool(self) -> Tool {
+        let problem = self.found.as_deref().and_then(|v| problem(self.name, v));
+        let ok = self.found.is_some() && problem.is_none();
+        Tool { name: self.name, ok, version: self.found, problem, need: self.need, hint: self.hint }
+    }
+}
+
+pub fn check() -> Report {
     let python = version("python", &["--version"]).or_else(|| version("python3", &["--version"]));
     let checks = [
         Check {
@@ -145,31 +173,41 @@ pub fn run() -> Result<()> {
             hint: "npm i -g @openai/codex",
         },
     ];
-    let usable = |c: &Check| c.found.as_deref().is_some_and(|v| problem(c.name, v).is_none());
-    for c in &checks {
-        match &c.found {
-            Some(v) => match problem(c.name, v) {
-                None => ui::line(format!("  {} {:<8} {}", green("✓"), bold(c.name), dim(v))),
-                Some(why) => ui::line(format!("  {} {:<8} {} {}", red("✗"), bold(c.name), dim(v), why)),
-            },
-            None if c.name == "cargo" => {
-                ui::line(format!("  {} {:<8} missing, {}: {}", red("✗"), bold(c.name), c.need, c.hint))
+    let tools: Vec<Tool> = checks.into_iter().map(Check::into_tool).collect();
+    let ready_to_scan = tools[1..12].iter().any(|t| t.ok);
+    let ready_to_port = tools[0].ok;
+    Report { ready_to_scan, ready_to_port, tools }
+}
+
+pub fn ensure_ready(report: &Report) -> Result<()> {
+    ensure!(
+        report.ready_to_scan,
+        "install Python, Node.js (or Bun, Deno), Ruby, Java, Go, PHP, .NET, R or a C compiler"
+    );
+    Ok(())
+}
+
+pub fn run() -> Result<()> {
+    let report = check();
+    for t in &report.tools {
+        match (&t.version, &t.problem) {
+            (Some(v), None) => ui::line(format!("  {} {:<8} {}", green("✓"), bold(t.name), dim(v))),
+            (Some(v), Some(why)) => ui::line(format!("  {} {:<8} {} {}", red("✗"), bold(t.name), dim(v), why)),
+            (None, _) if t.name == "cargo" => {
+                ui::line(format!("  {} {:<8} missing, {}: {}", red("✗"), bold(t.name), t.need, t.hint))
             }
-            None => ui::line(format!(
+            (None, _) => ui::line(format!(
                 "  {} {:<8} {}",
                 yellow("·"),
-                c.name,
-                dim(format!("not found ({}): {}", c.need, c.hint))
+                t.name,
+                dim(format!("not found ({}): {}", t.need, t.hint))
             )),
         }
     }
-    ensure!(
-        checks[1..12].iter().any(usable),
-        "install Python, Node.js (or Bun, Deno), Ruby, Java, Go, PHP, .NET, R or a C compiler"
-    );
+    ensure_ready(&report)?;
     ui::ok("ready to scan");
     // scanning works without Rust, so a missing toolchain only warns (#142)
-    if usable(&checks[0]) {
+    if report.ready_to_port {
         ui::ok("ready to port");
     } else {
         ui::warn("Rust 1.85 or newer is needed to port, verify and enable: https://rustup.rs");
@@ -193,5 +231,33 @@ mod tests {
         assert_eq!(problem("node", "v22.0.0"), None);
         assert!(problem("python", "Python 3.9.18").is_some());
         assert_eq!(problem("clang", "Debian clang version 14.0.6"), None, "no minimum");
+    }
+
+    #[test]
+    fn report_serializes_clean_json() {
+        let mk = |name, found: Option<&str>, need, hint| {
+            Check { name, found: found.map(String::from), need, hint }.into_tool()
+        };
+        let report = Report {
+            ready_to_scan: true,
+            ready_to_port: false,
+            tools: vec![
+                mk("cargo", None, "to port (scan works without it)", "https://rustup.rs"),
+                mk("python", Some("Python 3.12.1"), "for Python apps (3.10+)", "https://python.org"),
+                mk("ruby", Some("ruby 3.1.7p261"), "for Ruby apps (3.3+)", "https://ruby-lang.org"),
+            ],
+        };
+        let raw = serde_json::to_string_pretty(&report).unwrap();
+        assert!(!raw.contains("\x1b["), "no ANSI codes in JSON: {raw}");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!((&v["ready_to_scan"], &v["ready_to_port"]), (&serde_json::json!(true), &serde_json::json!(false)));
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0]["ok"], false);
+        assert!(tools[0].get("version").is_none() && tools[0].get("problem").is_none());
+        assert_eq!(tools[1]["ok"], true);
+        assert!(tools[2]["problem"].as_str().unwrap().contains("3.3 or newer"));
+        assert!(ensure_ready(&report).is_ok());
+        assert!(ensure_ready(&Report { ready_to_scan: false, ..report }).is_err());
     }
 }
