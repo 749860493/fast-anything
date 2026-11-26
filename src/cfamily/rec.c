@@ -62,15 +62,21 @@ void fa_rec_u64(unsigned long long v) {
 }
 static void fa_f64_to(fa_buf *b, double v) {
     char t[40];
-    if (!isfinite(v)) {
-        fa_bad = 1;
-        fa_puts(b, "null");
+    /* JSON has no NaN or infinity: the port's glue reads this form */
+    if (isnan(v)) {
+        fa_puts(b, "{\"$float\":\"NaN\"}");
+        return;
+    }
+    if (isinf(v)) {
+        fa_puts(b, v > 0 ? "{\"$float\":\"Infinity\"}" : "{\"$float\":\"-Infinity\"}");
         return;
     }
     snprintf(t, sizeof t, "%.17g", v);
     if (!strpbrk(t, ".eE")) strcat(t, ".0");
     fa_puts(b, t);
 }
+/* the same number, -0.0 apart from 0.0: an edge case that equals the recorded value is skipped */
+int fa_rec_same_f64(double a, double b) { return a == b && !signbit(a) == !signbit(b); }
 void fa_rec_f64(double v) {
     fa_sep();
     fa_f64_to(&fa_args, v);
@@ -136,7 +142,8 @@ void fa_rec_arr_f64(const void *p, size_t n, int size) {
     fa_puts(&fa_args, "[");
     for (size_t i = 0; i < n; i++) {
         if (i) fa_puts(&fa_args, ",");
-        fa_f64_to(&fa_args, size == 4 ? (double) ((const float *) p)[i] : ((const double *) p)[i]);
+        const char *e = (const char *) p + i * size;
+        fa_f64_to(&fa_args, size == 4 ? (double) *(const float *) e : size == 8 ? *(const double *) e : (double) *(const long double *) e);
     }
     fa_puts(&fa_args, "]");
 }
@@ -245,8 +252,8 @@ static int fa_edge_out = -1;
 static char **fa_edge_seen; /* every edge input tried, so one that crashes or hangs isn't tried again */
 static size_t fa_nseen;
 /* Runs the call (the code after it) in a child process; returns 1 there, 0 here. Here, it sets
- * fa_rec_edge_took (-1 if the child crashed, hung or gave a value JSON can't hold) and records
- * the case with the child's result: kind 1 an edge case, 2 a derived one, 0 none (only timed). */
+ * fa_rec_edge_took (-1 if the child crashed or hung) and records the case with the child's
+ * result: kind 1 an edge case, 2 a derived one, 0 none (only timed). */
 int fa_rec_fork(int kind) {
     fa_rec_edge_took = -1;
     if (fa_bad || (kind != 2 && !fa_rec_edge_ok())) return 0;
@@ -307,7 +314,7 @@ int fa_rec_fork(int kind) {
 }
 static void fa_answer(const char *result) {
     size_t len = strlen(result);
-    int ok = !fa_bad && write(fa_edge_out, result, len) == (ssize_t) len;
+    int ok = write(fa_edge_out, result, len) == (ssize_t) len;
     _exit(ok ? 0 : 1);
 }
 const void *fa_rec_empty(const void *p) {

@@ -24,8 +24,10 @@ inline bool enc_str(std::string &o, const std::string &s) {
 }
 inline bool enc(std::string &o, bool v) { o += v ? "true" : "false"; return true; }
 template <class T> typename std::enable_if<std::is_integral<T>::value, bool>::type enc(std::string &o, T v) { o += std::to_string(v); return true; }
+// JSON has no NaN or infinity: they travel as {"$float": name}, which the port's glue reads and writes
 template <class T> typename std::enable_if<std::is_floating_point<T>::value, bool>::type enc(std::string &o, T v) {
-    if (!std::isfinite((double) v)) return false;
+    if (std::isnan(v)) { o += "{\"$float\":\"NaN\"}"; return true; }
+    if (std::isinf(v)) { o += v > 0 ? "{\"$float\":\"Infinity\"}" : "{\"$float\":\"-Infinity\"}"; return true; }
     char t[40];
     std::snprintf(t, sizeof t, "%.17g", (double) v);
     if (!std::strpbrk(t, ".eE")) std::strcat(t, ".0");
@@ -169,7 +171,14 @@ inline V parse(const char *&p) {
 }
 inline void from(const V &v, bool &out) { out = v.b; }
 template <class T> typename std::enable_if<std::is_integral<T>::value>::type from(const V &v, T &out) { out = (T) (v.is_int ? v.i : (long long) v.num); }
-template <class T> typename std::enable_if<std::is_floating_point<T>::value>::type from(const V &v, T &out) { out = (T) (v.is_int ? (double) v.i : v.num); }
+template <class T> typename std::enable_if<std::is_floating_point<T>::value>::type from(const V &v, T &out) {
+    const V *tag = v.obj.size() == 1 ? v.get("$float") : nullptr;
+    const T inf = std::numeric_limits<T>::infinity();
+    if (tag && tag->s == "NaN") out = std::numeric_limits<T>::quiet_NaN();
+    else if (tag && tag->s == "Infinity") out = inf;
+    else if (tag && tag->s == "-Infinity") out = -inf;
+    else out = (T) (v.is_int ? (double) v.i : v.num);
+}
 inline void from(const V &v, std::string &out) { out = v.s; }
 template <class A, class B> void from(const V &v, std::pair<A, B> &out);
 template <class T, class Al> void from(const V &v, std::vector<T, Al> &out);
