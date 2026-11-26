@@ -18,6 +18,7 @@ import random
 import runpy
 import sys
 import time
+import types
 
 DISABLE_ENV = "FAST_ANYTHING_DISABLE"
 SKIP_DIRS = {".fast", ".git", "venv", ".venv", "env", ".env", "site-packages", "dist-packages",
@@ -881,6 +882,42 @@ class Recorder:
         if not hasattr(original, "__wrapped__"):
             wrapped = self.wrap(original)
             setattr(owner, job["func"], staticmethod(wrapped) if job.get("owner") else wrapped)
+            # Packages often re-export submodule functions in __init__.py (e.g. `from .core import f`),
+            # which runs during importlib.import_module() above before we wrap `owner.func`.
+            # Rebind any already-loaded module globals still pointing at `original`.
+            runner_mod = sys.modules.get(__name__)
+            mod_dict = types.ModuleType.__dict__["__dict__"].__get__
+            lazy_type = getattr(importlib.util, "_LazyModule", ())
+            is_method = type(original) is types.MethodType
+            for mod in list(sys.modules.values()):
+                mod_cls = type(mod)
+                if not issubclass(mod_cls, types.ModuleType) or mod is runner_mod or issubclass(mod_cls, lazy_type):
+                    continue
+                try:
+                    ns = mod_dict(mod, types.ModuleType)
+                except Exception:
+                    continue
+                if not isinstance(ns, dict):
+                    continue
+                for attr, val in list(ns.items()):
+                    same = val is original or (
+                        is_method
+                        and type(val) is types.MethodType
+                        and val.__func__ is original.__func__
+                        and (
+                            val.__self__ is original.__self__
+                            or (
+                                isinstance(original.__self__, type)
+                                and isinstance(val.__self__, type)
+                                and issubclass(val.__self__, original.__self__)
+                            )
+                        )
+                    )
+                    if same:
+                        try:
+                            setattr(mod, attr, wrapped)
+                        except Exception:
+                            pass
 
     def write(self, out, meta):
         with open(out, "w", encoding="utf-8") as f:
