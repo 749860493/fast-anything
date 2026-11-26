@@ -544,6 +544,9 @@ pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
 // ------------------------------------------------------------------ the shim
 
 /// ES module or CommonJS, the way Node decides it.
+/// Explicit extensions (.mjs/.mts, .cjs/.cts) and the nearest package.json's "type" win; when
+/// package.json is absent or omits "type", fall back to detecting top-level ESM syntax the way
+/// Node 22.12+ / 24 does.
 fn is_esm(root: &Path, file: &Path) -> bool {
     match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "mjs" | "mts" => return true,
@@ -553,15 +556,516 @@ fn is_esm(root: &Path, file: &Path) -> bool {
     let mut dir = file.parent();
     while let Some(d) = dir {
         if let Ok(text) = fs::read_to_string(d.join("package.json")) {
-            return serde_json::from_str::<Value>(text.strip_prefix('\u{feff}').unwrap_or(&text))
+            let pkg_type = serde_json::from_str::<Value>(text.strip_prefix('\u{feff}').unwrap_or(&text))
                 .ok()
-                .and_then(|v| v["type"].as_str().map(|t| t == "module"))
-                .unwrap_or(false);
+                .and_then(|v| v["type"].as_str().map(str::to_string));
+            match pkg_type.as_deref() {
+                Some("module") => return true,
+                Some("commonjs") => return false,
+                _ => break,
+            }
         }
         if d == root {
             break;
         }
         dir = d.parent();
+    }
+    fs::read_to_string(file).is_ok_and(|text| has_esm_syntax(&text))
+}
+
+/// Whether JS/TS source uses ES module syntax that triggers Node's module syntax detection:
+/// top-level `import` / `export` runtime declarations or `import.meta`. Skips comments,
+/// strings/templates, regex literals, dynamic `import(...)`, and TypeScript type-only imports/exports.
+/// Top-level `await` without `import`/`export`/`import.meta` is intentionally left out so CJS files
+/// with expression-bodied `async` arrows are never misclassified as ESM.
+fn has_esm_syntax(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let text = if text.starts_with("#!") { text.find('\n').map_or("", |i| &text[i + 1..]) } else { text };
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut stmt_start = true;
+    let mut after_dot = false;
+    let mut regex_allowed = true;
+    let mut block_brace_next = true;
+    let mut cond_paren_next = false;
+    let mut saw_newline = true;
+    let mut no_regex_before = 0usize;
+    // Stack of template-literal interpolation brace depths (`${ ... }`).
+    let mut template_braces: Vec<usize> = Vec::new();
+    // Whether each open `{` (non-template) started a statement block rather than an object literal.
+    let mut brace_stack: Vec<bool> = Vec::new();
+    // Whether each open `(` is a control-statement header (`if`/`while`/`for`/`with`) whose `)` allows regex.
+    let mut paren_stack: Vec<bool> = Vec::new();
+
+    let unicode_ws_at = |pos: usize| -> Option<(usize, bool)> {
+        let ch = text[pos..].chars().next()?;
+        if ch == '\u{2028}' || ch == '\u{2029}' {
+            Some((ch.len_utf8(), true))
+        } else if ch.is_whitespace() || ch == '\u{feff}' {
+            Some((ch.len_utf8(), false))
+        } else {
+            None
+        }
+    };
+
+    let skip_ws_and_comments = |mut pos: usize| -> usize {
+        while pos < len {
+            let b = bytes[pos];
+            if b.is_ascii_whitespace() {
+                pos += 1;
+            } else if b >= 0x80
+                && let Some((step, _)) = unicode_ws_at(pos)
+            {
+                pos += step;
+            } else if b == b'/' && pos + 1 < len && bytes[pos + 1] == b'/' {
+                pos += 2;
+                while pos < len && bytes[pos] != b'\n' {
+                    pos += 1;
+                }
+            } else if b == b'/' && pos + 1 < len && bytes[pos + 1] == b'*' {
+                pos += 2;
+                while pos + 1 < len && !(bytes[pos] == b'*' && bytes[pos + 1] == b'/') {
+                    pos += 1;
+                }
+                pos = (pos + 2).min(len);
+            } else {
+                break;
+            }
+        }
+        pos
+    };
+
+    let read_ident = |pos: usize| -> Option<(&str, usize)> {
+        if pos >= len {
+            return None;
+        }
+        let b = bytes[pos];
+        let mut end = if b.is_ascii_alphabetic() || b == b'_' || b == b'$' {
+            pos + 1
+        } else if b >= 0x80 {
+            let ch = text[pos..].chars().next()?;
+            if ch.is_whitespace() || ch == '\u{feff}' {
+                return None;
+            }
+            pos + ch.len_utf8()
+        } else {
+            return None;
+        };
+        while end < len {
+            let nb = bytes[end];
+            if nb.is_ascii_alphanumeric() || nb == b'_' || nb == b'$' {
+                end += 1;
+            } else if nb >= 0x80 {
+                let Some(ch) = text[end..].chars().next() else { break };
+                if ch.is_whitespace() || ch == '\u{feff}' {
+                    break;
+                }
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        Some((&text[pos..end], end))
+    };
+
+    while i < len {
+        let b = bytes[i];
+        if b == b' ' || b == b'\t' || b == b'\x0b' || b == b'\x0c' {
+            i += 1;
+            continue;
+        }
+        if b == b'\n' || b == b'\r' {
+            saw_newline = true;
+            if !after_dot && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                stmt_start = true;
+            }
+            i += 1;
+            continue;
+        }
+        if b >= 0x80
+            && let Some((step, is_line_sep)) = unicode_ws_at(i)
+        {
+            if is_line_sep {
+                saw_newline = true;
+                if !after_dot && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    stmt_start = true;
+                }
+            }
+            i += step;
+            continue;
+        }
+        // Comments
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            let mut has_nl = false;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                if bytes[i] == b'\n' || bytes[i] == b'\r' {
+                    has_nl = true;
+                }
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            if has_nl {
+                saw_newline = true;
+                if !after_dot && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    stmt_start = true;
+                }
+            }
+            continue;
+        }
+        // Quoted strings
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            i += 1;
+            while i < len && bytes[i] != q {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            i = (i + 1).min(len);
+            stmt_start = false;
+            after_dot = false;
+            regex_allowed = false;
+            block_brace_next = false;
+            cond_paren_next = false;
+            saw_newline = false;
+            continue;
+        }
+        // Template literal start
+        if b == b'`' {
+            i += 1;
+            let mut entered_expr = false;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == b'`' {
+                    i += 1;
+                    break;
+                } else if bytes[i] == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                    template_braces.push(brace_depth);
+                    brace_depth += 1;
+                    i += 2;
+                    entered_expr = true;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            stmt_start = false;
+            after_dot = false;
+            regex_allowed = entered_expr;
+            block_brace_next = false;
+            cond_paren_next = false;
+            saw_newline = false;
+            continue;
+        }
+        // Single-line regex literal (bounded by `no_regex_before` so unterminated `/` stays O(N))
+        if b == b'/' && regex_allowed && i >= no_regex_before {
+            let mut j = i + 1;
+            let mut in_class = false;
+            let mut closed = false;
+            while j < len && bytes[j] != b'\n' && bytes[j] != b'\r' {
+                if bytes[j] == b'\\' {
+                    if j + 1 >= len || bytes[j + 1] == b'\n' || bytes[j + 1] == b'\r' {
+                        break;
+                    }
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == b'[' {
+                    in_class = true;
+                } else if bytes[j] == b']' {
+                    in_class = false;
+                } else if bytes[j] == b'/' && !in_class {
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if closed {
+                j += 1;
+                while j < len && bytes[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                i = j;
+                stmt_start = false;
+                after_dot = false;
+                regex_allowed = false;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+                continue;
+            }
+            no_regex_before = j;
+        }
+        // Identifiers / keywords
+        if let Some((word, end)) = read_ident(i) {
+            if !after_dot {
+                if word == "import" {
+                    let next = skip_ws_and_comments(end);
+                    // `import.meta` triggers ESM anywhere in the file.
+                    if next < len && bytes[next] == b'.' {
+                        let after = skip_ws_and_comments(next + 1);
+                        if let Some(("meta", _)) = read_ident(after) {
+                            return true;
+                        }
+                    } else if brace_depth == 0 && stmt_start && next < len && bytes[next] != b'(' {
+                        // Top-level `import` declaration, excluding TS `import type ...` and `import x = require(...)`.
+                        match bytes[next] {
+                            b'\'' | b'"' | b'{' | b'*' => return true,
+                            _ => {
+                                if let Some((w2, end2)) = read_ident(next) {
+                                    let after_w2 = skip_ws_and_comments(end2);
+                                    if w2 == "type" {
+                                        // `import type from "mod"` / `import type, { a } from "mod"` imports a default named `type`,
+                                        // whereas `import type from from "mod"` is a TS type-only import of a type named `from`.
+                                        let is_default_named_type = read_ident(after_w2).is_some_and(|(w3, end3)| {
+                                            if w3 != "from" {
+                                                return false;
+                                            }
+                                            let after_from = skip_ws_and_comments(end3);
+                                            after_from < len && matches!(bytes[after_from], b'\'' | b'"')
+                                        }) || (after_w2 < len && bytes[after_w2] == b',');
+                                        if is_default_named_type {
+                                            return true;
+                                        }
+                                    } else if after_w2 < len && bytes[after_w2] == b'=' {
+                                        // TypeScript CJS `import x = require(...)`
+                                    } else {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if word == "export" && brace_depth == 0 && stmt_start {
+                    let next = skip_ws_and_comments(end);
+                    if next < len {
+                        match bytes[next] {
+                            b'{' | b'*' => return true,
+                            _ => {
+                                if let Some((w2, _)) = read_ident(next)
+                                    && matches!(
+                                        w2,
+                                        "default"
+                                            | "function"
+                                            | "async"
+                                            | "class"
+                                            | "const"
+                                            | "let"
+                                            | "var"
+                                            | "enum"
+                                            | "abstract"
+                                    )
+                                {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            regex_allowed = !after_dot
+                && matches!(
+                    word,
+                    "return"
+                        | "case"
+                        | "throw"
+                        | "in"
+                        | "typeof"
+                        | "void"
+                        | "delete"
+                        | "new"
+                        | "yield"
+                        | "await"
+                        | "else"
+                        | "do"
+                );
+            block_brace_next = after_dot
+                || !matches!(
+                    word,
+                    "return" | "throw" | "yield" | "await" | "typeof" | "void" | "delete" | "in" | "new" | "default"
+                );
+            cond_paren_next =
+                !after_dot && (matches!(word, "if" | "while" | "for" | "with") || (word == "await" && cond_paren_next));
+            stmt_start = false;
+            after_dot = false;
+            saw_newline = false;
+            i = end;
+            continue;
+        }
+        // Numbers
+        if b.is_ascii_digit() {
+            i += 1;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.') {
+                i += 1;
+            }
+            stmt_start = false;
+            after_dot = false;
+            regex_allowed = false;
+            block_brace_next = false;
+            cond_paren_next = false;
+            saw_newline = false;
+            continue;
+        }
+        // Multi-character operators that affect `/` and `{` disambiguation
+        if (b == b'+' && i + 1 < len && bytes[i + 1] == b'+') || (b == b'-' && i + 1 < len && bytes[i + 1] == b'-') {
+            stmt_start = false;
+            after_dot = false;
+            regex_allowed = false;
+            block_brace_next = false;
+            cond_paren_next = false;
+            saw_newline = false;
+            i += 2;
+            continue;
+        }
+        if b == b'=' && i + 1 < len && bytes[i + 1] == b'>' {
+            stmt_start = false;
+            after_dot = false;
+            regex_allowed = true;
+            block_brace_next = true;
+            cond_paren_next = false;
+            saw_newline = false;
+            i += 2;
+            continue;
+        }
+        // Punctuation
+        match b {
+            b'{' => {
+                brace_stack.push(block_brace_next);
+                brace_depth += 1;
+                stmt_start = true;
+                after_dot = false;
+                regex_allowed = true;
+                block_brace_next = true;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                if template_braces.last().copied() == Some(brace_depth) {
+                    template_braces.pop();
+                    // Resume scanning the enclosing template literal.
+                    i += 1;
+                    let mut entered_expr = false;
+                    while i < len {
+                        if bytes[i] == b'\\' {
+                            i += 2;
+                        } else if bytes[i] == b'`' {
+                            i += 1;
+                            break;
+                        } else if bytes[i] == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                            template_braces.push(brace_depth);
+                            brace_depth += 1;
+                            i += 2;
+                            entered_expr = true;
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    stmt_start = false;
+                    after_dot = false;
+                    regex_allowed = entered_expr;
+                    block_brace_next = false;
+                    cond_paren_next = false;
+                    saw_newline = false;
+                    continue;
+                }
+                let is_block = brace_stack.pop().unwrap_or(true);
+                stmt_start = is_block && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0;
+                after_dot = false;
+                regex_allowed = is_block;
+                block_brace_next = is_block;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b'(' => {
+                paren_stack.push(cond_paren_next);
+                paren_depth += 1;
+                stmt_start = false;
+                after_dot = false;
+                regex_allowed = true;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                stmt_start = false;
+                after_dot = false;
+                regex_allowed = true;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                let after_cond = paren_stack.pop().unwrap_or(false);
+                stmt_start = false;
+                after_dot = false;
+                regex_allowed = after_cond;
+                block_brace_next = true;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                stmt_start = false;
+                after_dot = false;
+                regex_allowed = false;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b'!' => {
+                // TypeScript postfix non-null assertion (`expr!`) keeps `/` as division; prefix `!` and `!=` allow regex.
+                regex_allowed = (i + 1 < len && bytes[i + 1] == b'=') || regex_allowed || saw_newline;
+                stmt_start = false;
+                after_dot = false;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b';' => {
+                stmt_start = brace_depth == 0 && paren_depth == 0 && bracket_depth == 0;
+                after_dot = false;
+                regex_allowed = true;
+                block_brace_next = true;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            b'.' => {
+                stmt_start = false;
+                after_dot = true;
+                regex_allowed = false;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+            _ => {
+                stmt_start = false;
+                after_dot = false;
+                regex_allowed = true;
+                block_brace_next = false;
+                cond_paren_next = false;
+                saw_newline = false;
+            }
+        }
+        i += 1;
     }
     false
 }
@@ -1971,13 +2475,6 @@ assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALU
                 "1009,1016",
                 "9,16",
             ),
-            (
-                "auto-esm-module-null",
-                "const module = null;\nexport function sq(x) {\n  return x * x;\n}\n",
-                "import { sq } from \"./lib.js\";\nconsole.log(sq(3));\n",
-                "9",
-                "9",
-            ),
         ];
         let base = std::env::temp_dir().join(format!("fa-node-cjs-en-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
@@ -2128,6 +2625,184 @@ assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALU
         assert!(is_esm_file(&base, &base.join("a.ts"), Runtime::Deno));
         assert!(!is_esm_file(&base, &base.join("a.cjs"), Runtime::Deno));
         assert!(!is_esm_file(&base, &base.join("a.cts"), Runtime::Deno));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn auto_detected_esm_without_package_type_enables_and_loads() {
+        // Syntax-level checks for has_esm_syntax.
+        assert!(has_esm_syntax("export function f(x) { return x; }\n"));
+        assert!(has_esm_syntax("const x = 1\nexport const f = (n) => n + x\n"));
+        assert!(has_esm_syntax("import { a } from './a.js';\nfunction f() { return a; }\n"));
+        assert!(has_esm_syntax("import './side-effect.js';\n"));
+        assert!(has_esm_syntax("import type from './mod.js';\n"));
+        assert!(has_esm_syntax("import type, { a } from './mod.js';\n"));
+        assert!(has_esm_syntax("const re = /'/;\nexport default function f(x) { return x; }\n"));
+        assert!(has_esm_syntax("function f() { return import.meta.url; }\n"));
+        assert!(has_esm_syntax("\u{feff}#!/usr/bin/env node\nexport function f() {}\n"));
+        assert!(has_esm_syntax("const s = `a ${1 + 2} b`;\nexport const f = () => s;\n"));
+        assert!(has_esm_syntax("let i = 4;\nconst a = i++ / 2; // don't break\nexport function f(x) { return x; }\n"));
+        assert!(has_esm_syntax("let i = 4;\nconst a = i-- / 2; // '\nexport function f(x) { return x; }\n"));
+        assert!(has_esm_syntax("const a = { valueOf() { return 4; } } / 2; // '\nexport function f() {}\n"));
+        assert!(has_esm_syntax("const a = m.get('a')! / 2; // '\nexport function f() {}\n"));
+        assert!(has_esm_syntax("if (ok) /'/.test(s);\nexport function f() {}\n"));
+        assert!(has_esm_syntax("const x = 1 /*\n*/ export function f(n) { return n; }\n"));
+        assert!(has_esm_syntax("\u{00a0}export function f(x) { return x; }\n"));
+        assert!(has_esm_syntax("const x = 1\u{2028}export function f(x) { return x; }\n"));
+        assert!(!has_esm_syntax("function f(x) { return x; }\nmodule.exports = { f };\n"));
+        assert!(!has_esm_syntax("exports.f = function(x) { return x; };\n"));
+        assert!(!has_esm_syntax("// export function f() {}\n/* import x from 'y'; */\nmodule.exports = {};\n"));
+        assert!(!has_esm_syntax("const s = \"export function f() {}\";\nconst t = `import.meta.url`;\n"));
+        assert!(!has_esm_syntax("import('./x.js');\nmodule.exports = {};\n"));
+        assert!(!has_esm_syntax("async function f() { return import('./x.js'); }\nmodule.exports = { f };\n"));
+        assert!(!has_esm_syntax(
+            "import type { Stats } from 'node:fs';\nexport type T = number;\nmodule.exports = {};\n"
+        ));
+        assert!(!has_esm_syntax("import type from from './types.ts';\nmodule.exports = {};\n"));
+        assert!(!has_esm_syntax("import fs = require('node:fs');\nexport interface I { x: number }\n"));
+        assert!(!has_esm_syntax("const obj = { export: 1, import: 2 };\nconsole.log(obj.import.meta);\n"));
+        assert!(!has_esm_syntax(
+            "let i = 4;\nconst a = i++ / 2; // '\nconst s = \"'; export function fake() {}\";\nmodule.exports = { a, s };\n"
+        ));
+        assert!(!has_esm_syntax(
+            "const a = { valueOf() { return 4; } } / 2; // '\nconst s = \"'; export function fake() {}\";\nmodule.exports = { a, s };\n"
+        ));
+        assert!(!has_esm_syntax(
+            "if (ok) /'/.test(s);\nconst t = \"'; export function fake() {}\";\nmodule.exports = { t };\n"
+        ));
+        // Unterminated `/` on a long line must stay linear rather than quadratic.
+        let pathological = format!("{}\nconst ok = 1;\n", "x = /[".repeat(20_000));
+        assert!(!has_esm_syntax(&pathological));
+
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let base = tmp.join(format!("fa-node-auto-esm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+
+        // 1. Auto-detected ESM in .ts (no package.json) and .js (package.json without "type"):
+        //    enable() must emit ESM createRequire(import.meta.url) so Node loads the addon instead of
+        //    silently swallowing ReferenceError: require is not defined.
+        for (name, ext, pkg, lib_src, app_src) in [
+            (
+                "ts-no-pkg",
+                "ts",
+                None,
+                "export function sq(x: number): number {\n  return x * x;\n}\n",
+                "import { sq } from \"./lib.ts\";\nconsole.log(sq(3));\n",
+            ),
+            (
+                "js-pkg-no-type",
+                "js",
+                Some("{\"name\": \"demo\"}\n"),
+                "const module = null;\nexport function sq(x) {\n  return x * x;\n}\n",
+                "import { sq } from \"./lib.js\";\nconsole.log(sq(3));\n",
+            ),
+            (
+                "js-no-semicolons",
+                "js",
+                None,
+                "const offset = 0\nexport const sq = (x) => x * x + offset\n",
+                "import { sq } from \"./lib.js\"\nconsole.log(sq(3))\n",
+            ),
+        ] {
+            let dir = base.join(name);
+            fs::create_dir_all(dir.join(".fast/lib")).unwrap();
+            if let Some(pkg) = pkg {
+                fs::write(dir.join("package.json"), pkg).unwrap();
+            }
+            let lib_name = format!("lib.{ext}");
+            let app_name = format!("app.{ext}");
+            fs::write(dir.join(&lib_name), lib_src).unwrap();
+            fs::write(dir.join(&app_name), app_src).unwrap();
+            fs::write(dir.join("fake_addon.cjs"), "module.exports = { sq: (x) => x * x + 1000 };\n").unwrap();
+            let port = Port {
+                id: "lib.sq".into(),
+                file: lib_name.clone(),
+                module: "lib".into(),
+                func: "sq".into(),
+                ext: "fa_lib_sq".into(),
+                crate_dir: ".fast/ports/lib.sq".into(),
+                recorded: 1,
+                calls_seen: 1,
+                verify: None,
+                enabled: false,
+                lang: backend::Lang::Node,
+                owner: None,
+                line: 1,
+                sources: vec![],
+            };
+            let ctx = Ctx::open(&dir).unwrap();
+            assert!(is_esm(&dir, &dir.join(&lib_name)), "{name}: expected auto-detected ESM");
+            enable(&ctx, &port).unwrap();
+            let on_disk = fs::read_to_string(dir.join(&lib_name)).unwrap();
+            assert!(on_disk.contains("createRequire(import.meta.url)"), "{name}: expected ESM shim, got:\n{on_disk}");
+            assert!(!on_disk.contains("module.exports"), "{name}: ESM shim must not emit CJS sync:\n{on_disk}");
+
+            // Run with a real Node subprocess using a CJS fake addon loaded through the ESM shim.
+            let runnable = on_disk.replace("./.fast/lib/fa_lib_sq.node", "./fake_addon.cjs");
+            fs::write(dir.join(&lib_name), &runnable).unwrap();
+            let rust_run =
+                Command::new("node").arg(&app_name).current_dir(&dir).env_remove(DISABLE_ENV).output().unwrap();
+            let orig_run =
+                Command::new("node").arg(&app_name).current_dir(&dir).env(DISABLE_ENV, "1").output().unwrap();
+            fs::write(dir.join(&lib_name), &on_disk).unwrap();
+            disable(&ctx, &port).unwrap();
+            let restored = fs::read_to_string(dir.join(&lib_name)).unwrap();
+
+            assert!(rust_run.status.success(), "{name}: enabled run failed: {}", combined(&rust_run));
+            assert_eq!(
+                String::from_utf8_lossy(&rust_run.stdout).trim(),
+                "1009",
+                "{name}: Rust addon must actually load in auto-detected ESM"
+            );
+            assert!(orig_run.status.success(), "{name}: disabled run failed: {}", combined(&orig_run));
+            assert_eq!(String::from_utf8_lossy(&orig_run.stdout).trim(), "9", "{name}: FAST_ANYTHING_DISABLE=1");
+            assert_eq!(restored, lib_src, "{name}: disable must restore byte for byte");
+        }
+
+        // 2. Explicit package.json "type": "commonjs" disables syntax detection (stays CJS),
+        //    and a .ts file with only `import type` / `export type` + `module.exports` stays CJS.
+        let cjs_pkg = base.join("pkg-cjs");
+        fs::create_dir_all(&cjs_pkg).unwrap();
+        fs::write(cjs_pkg.join("package.json"), "{\"type\": \"commonjs\"}\n").unwrap();
+        fs::write(cjs_pkg.join("lib.js"), "export function sq(x) { return x * x; }\n").unwrap();
+        assert!(!is_esm(&cjs_pkg, &cjs_pkg.join("lib.js")), "explicit type=commonjs must stay CJS");
+
+        let ts_type_only = base.join("ts-type-only");
+        fs::create_dir_all(&ts_type_only).unwrap();
+        fs::write(
+            ts_type_only.join("lib.ts"),
+            "export type Num = number;\nfunction sq(x: Num): Num { return x * x; }\nmodule.exports = { sq };\n",
+        )
+        .unwrap();
+        assert!(!is_esm(&ts_type_only, &ts_type_only.join("lib.ts")), "type-only TS export with CJS must stay CJS");
+
+        // 3. Nearest package.json wins even when it omits "type" (does not inherit parent "type").
+        let nested_cjs_parent = base.join("nested-cjs-parent");
+        fs::create_dir_all(nested_cjs_parent.join("sub")).unwrap();
+        fs::write(nested_cjs_parent.join("package.json"), "{\"type\": \"commonjs\"}\n").unwrap();
+        fs::write(nested_cjs_parent.join("sub/package.json"), "{\"name\": \"sub\"}\n").unwrap();
+        fs::write(nested_cjs_parent.join("sub/lib.js"), "export function sq(x) { return x * x; }\n").unwrap();
+        assert!(
+            is_esm(&nested_cjs_parent, &nested_cjs_parent.join("sub/lib.js")),
+            "nearest package.json omitting type must detect ESM instead of inheriting parent commonjs"
+        );
+
+        let nested_esm_parent = base.join("nested-esm-parent");
+        fs::create_dir_all(nested_esm_parent.join("sub")).unwrap();
+        fs::write(nested_esm_parent.join("package.json"), "{\"type\": \"module\"}\n").unwrap();
+        fs::write(nested_esm_parent.join("sub/package.json"), "{\"name\": \"sub\"}\n").unwrap();
+        fs::write(nested_esm_parent.join("sub/lib.js"), "function sq(x) { return x * x; }\nmodule.exports = { sq };\n")
+            .unwrap();
+        assert!(
+            !is_esm(&nested_esm_parent, &nested_esm_parent.join("sub/lib.js")),
+            "nearest package.json omitting type must stay CJS for CJS syntax instead of inheriting parent module"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
