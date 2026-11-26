@@ -482,25 +482,117 @@ fn ident(name: &str) -> String {
     if RUST_KEYWORDS.contains(&name) { format!("r#{name}") } else { name.to_string() }
 }
 
-/// A Python default value as a PyO3 signature default, if it's a simple literal.
-fn rust_default(value: &str) -> Option<String> {
-    let v = value.trim();
-    Some(match v {
-        "None" => "None".into(),
-        "True" => "true".into(),
-        "False" => "false".into(),
-        _ if v.parse::<i64>().is_ok() || v.parse::<f64>().is_ok() => v.into(),
-        _ if (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')) => {
-            format!("{:?}", &v[1..v.len() - 1])
-        }
+/// Unescape a single Python string literal (as emitted by `ast.unparse`, e.g. `'\\n'`, `"don't"`).
+/// Returns None for compound expressions (`"a" + "b"`), prefixes (`b"..."`), or unknown escapes.
+fn parse_py_str_literal(v: &str) -> Option<String> {
+    let quote = match v.as_bytes() {
+        [q @ (b'\'' | b'"'), .., end] if v.len() >= 2 && *end == *q => *q as char,
         _ => return None,
-    })
+    };
+    let inner = &v[1..v.len() - 1];
+    let mut chars = inner.chars().peekable();
+    let mut out = String::with_capacity(inner.len());
+    while let Some(c) = chars.next() {
+        if c == quote {
+            // Unescaped closing quote before the end, e.g. `"a" + "b"`.
+            return None;
+        }
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let esc = chars.next()?;
+        match esc {
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '"' => out.push('"'),
+            'a' => out.push('\x07'),
+            'b' => out.push('\x08'),
+            'f' => out.push('\x0c'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'v' => out.push('\x0b'),
+            '0'..='7' => {
+                let mut val = esc.to_digit(8)?;
+                for _ in 0..2 {
+                    if let Some(&d) = chars.peek()
+                        && ('0'..='7').contains(&d)
+                    {
+                        val = val * 8 + chars.next()?.to_digit(8)?;
+                    } else {
+                        break;
+                    }
+                }
+                out.push(char::from_u32(val)?);
+            }
+            'x' | 'u' | 'U' => {
+                let n = match esc {
+                    'x' => 2,
+                    'u' => 4,
+                    _ => 8,
+                };
+                let mut hex = String::with_capacity(n);
+                for _ in 0..n {
+                    let d = chars.next()?;
+                    if !d.is_ascii_hexdigit() {
+                        return None;
+                    }
+                    hex.push(d);
+                }
+                let code = u32::from_str_radix(&hex, 16).ok()?;
+                out.push(char::from_u32(code)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
-/// The PyO3 signature default for a parameter: its literal, or None when the Python default
-/// isn't a simple literal (the port then gets None and applies the default itself).
-fn signature_default(p: &crate::hotspot::Param) -> Option<String> {
-    p.default.as_deref().map(|d| rust_default(d).unwrap_or_else(|| "None".into()))
+/// A Python default value as a PyO3 signature default compatible with `rust_ty`, if it's a simple literal.
+fn rust_default(value: &str, rust_ty: &str) -> Option<String> {
+    let v = value.trim();
+    if v == "None" {
+        return Some("None".into());
+    }
+    let (inner, is_option) = match rust_ty.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+        Some(inner) => (inner, true),
+        None => (rust_ty, false),
+    };
+    let lit = match inner {
+        "bool" => match v {
+            "True" => "true".into(),
+            "False" => "false".into(),
+            _ => return None,
+        },
+        "i64" => v.parse::<i64>().ok()?.to_string(),
+        "f64" => {
+            let stripped = v.strip_prefix('+').unwrap_or(v);
+            let unsigned = stripped.strip_prefix('-').unwrap_or(stripped);
+            if !unsigned.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            if !stripped.parse::<f64>().is_ok_and(f64::is_finite) {
+                return None;
+            }
+            if stripped.contains(['.', 'e', 'E']) {
+                stripped.to_string()
+            } else if stripped == "-0" {
+                "0.0".into()
+            } else {
+                format!("{stripped}.0")
+            }
+        }
+        "&str" => format!("{:?}", parse_py_str_literal(v)?),
+        _ => return None,
+    };
+    Some(if is_option { format!("Some({lit})") } else { lit })
+}
+
+/// The PyO3 signature default for a parameter: its typed literal, or None when the Python default
+/// isn't a compatible literal (the port then gets Option<T> = None and applies the default itself).
+fn signature_default(p: &crate::hotspot::Param, rust_ty: &str) -> Option<String> {
+    p.default.as_deref().map(|d| rust_default(d, rust_ty).unwrap_or_else(|| "None".into()))
 }
 
 /// The annotation names this class (as a whole word: Point in list[Point], not in PointCloud).
@@ -575,33 +667,34 @@ fn record_structs(hs: &Hotspot) -> Vec<(String, String)> {
     out
 }
 
+fn param_rust_type(p: &crate::hotspot::Param, known: &dyn Fn(&str) -> Option<String>) -> String {
+    p.annotation.as_deref().and_then(|a| rust_type_in(a, false, known)).unwrap_or_else(|| "&Bound<'_, PyAny>".into())
+}
+
 pub fn lib_rs(hs: &Hotspot, port: &Port) -> String {
     let structs = record_structs(hs);
     let known = |a: &str| structs.iter().any(|(name, _)| name == a).then(|| struct_name(a));
+    let param_tys: Vec<String> = hs.params.iter().map(|p| param_rust_type(p, &known)).collect();
     let mut params: Vec<String> = hs
         .params
         .iter()
-        .map(|p| {
-            let ty = p
-                .annotation
-                .as_deref()
-                .and_then(|a| rust_type_in(a, false, &known))
-                .unwrap_or_else(|| "&Bound<'_, PyAny>".into());
-            let ty = if signature_default(p).as_deref() == Some("None") && !ty.starts_with("Option<") {
-                format!("Option<{ty}>")
+        .zip(&param_tys)
+        .map(|(p, base_ty)| {
+            let ty = if signature_default(p, base_ty).as_deref() == Some("None") && !base_ty.starts_with("Option<") {
+                format!("Option<{base_ty}>")
             } else {
-                ty
+                base_ty.clone()
             };
             format!("{}: {ty}", ident(&p.name))
         })
         .collect();
     let signature = if hs.params.iter().any(|p| p.default.is_some() || p.kwonly) {
         let mut parts = vec![];
-        for (i, p) in hs.params.iter().enumerate() {
+        for (i, (p, base_ty)) in hs.params.iter().zip(&param_tys).enumerate() {
             if p.kwonly && (i == 0 || !hs.params[i - 1].kwonly) {
                 parts.push("*".to_string());
             }
-            parts.push(match signature_default(p) {
+            parts.push(match signature_default(p, base_ty) {
                 Some(d) => format!("{} = {d}", ident(&p.name)),
                 None => ident(&p.name),
             });
@@ -763,8 +856,10 @@ pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path,
     if lib_rs(hs, port).contains("numpy::") {
         notes.push_str("- Note: NDArray parameters arrive as `numpy::PyReadonlyArrayDyn` (`.as_array()` gives an ndarray view, `.as_slice()` a slice when contiguous); return arrays as `Py<numpy::PyArrayDyn<T>>`, e.g. `numpy::ndarray::Array::from(vec).into_dyn().into_pyarray(py).unbind()` with `use numpy::IntoPyArray`. verify compares shape, dtype and values.\n");
     }
+    let known = |a: &str| structs.iter().any(|name| name == a).then(|| struct_name(a));
     for p in &hs.params {
-        if let Some(d) = p.default.as_deref().filter(|d| rust_default(d).is_none()) {
+        let ty = param_rust_type(p, &known);
+        if let Some(d) = p.default.as_deref().filter(|d| rust_default(d, &ty).is_none()) {
             notes.push_str(&format!(
                 "- Note: `{}` defaults to `{d}` in Python; the Rust signature takes `None` for it, use that default then.\n",
                 p.name
@@ -1455,6 +1550,101 @@ sys.exit(1 if fails else 0)
         let lib = lib_rs(&hs, &port());
         assert!(lib.contains("#[pyo3(signature = (a = 1, *, b))]"), "{lib}");
         assert!(lib.contains("fn join_words(a: i64, b: i64)"), "{lib}");
+    }
+
+    #[test]
+    fn scaffold_defaults_match_rust_types_and_unescape_strings() {
+        use crate::hotspot::Param;
+        let p = |name: &str, annotation: Option<&str>, default: Option<&str>| Param {
+            name: name.into(),
+            annotation: annotation.map(Into::into),
+            default: default.map(Into::into),
+            kwonly: false,
+            splat: false,
+        };
+        let hs = Hotspot {
+            name: "scale".into(),
+            file: "work.py".into(),
+            line: 1,
+            params: vec![
+                p("xs", Some("list[float]"), None),
+                p("factor", Some("float"), Some("1")),
+                p("bias", Some("float"), Some("-2")),
+                p("pos_i", Some("int"), Some("+1")),
+                p("pos_f", Some("float"), Some("+2")),
+                p("pos_fd", Some("float"), Some("+1.5")),
+                p("big_f", Some("float"), Some("100000000000000000000")),
+                p("neg_z", Some("float"), Some("-0")),
+                p("neg_zf", Some("float"), Some("-0.0")),
+                p("tol", Some("float"), Some("1e-6")),
+                p("flag", Some("bool"), Some("False")),
+                p("opt_b", Some("bool | None"), Some("True")),
+                p("bad_b", Some("bool"), Some("1")),
+                p("sep", Some("str"), Some(r"'\n'")),
+                p("quote", Some("str"), Some(r#""don't""#)),
+                p("tab", Some("str"), Some(r"'\t'")),
+                p("slash", Some("str"), Some(r"'\\'")),
+                p("cap", Some("int | None"), Some("10")),
+                p("opt_none", Some("int | None"), Some("None")),
+                p("opt_const", Some("Optional[int]"), Some("CONST")),
+                p("opt_f", Some("Optional[float]"), Some("0")),
+                p("opt_s", Some("str | None"), Some(r"'\n'")),
+                p("untyped", None, Some("5")),
+                p("compound", Some("str"), Some(r#""a" + "b""#)),
+                p("bad_inf", Some("float"), Some("inf")),
+                p("bare_dot", Some("float"), Some(".5")),
+            ],
+            returns: Some("float".into()),
+            ..Hotspot::default()
+        };
+        let lib = lib_rs(&hs, &port());
+        assert!(
+            lib.contains(
+                "#[pyo3(signature = (xs, factor = 1.0, bias = -2.0, pos_i = 1, pos_f = 2.0, pos_fd = 1.5, big_f = 100000000000000000000.0, neg_z = 0.0, neg_zf = -0.0, tol = 1e-6, flag = false, opt_b = Some(true), bad_b = None, sep = \"\\n\", quote = \"don't\", tab = \"\\t\", slash = \"\\\\\", cap = Some(10), opt_none = None, opt_const = None, opt_f = Some(0.0), opt_s = Some(\"\\n\"), untyped = None, compound = None, bad_inf = None, bare_dot = None))]"
+            ),
+            "{lib}"
+        );
+        assert!(
+            lib.contains(
+                "fn scale(xs: Vec<f64>, factor: f64, bias: f64, pos_i: i64, pos_f: f64, pos_fd: f64, big_f: f64, neg_z: f64, neg_zf: f64, tol: f64, flag: bool, opt_b: Option<bool>, bad_b: Option<bool>, sep: &str, quote: &str, tab: &str, slash: &str, cap: Option<i64>, opt_none: Option<i64>, opt_const: Option<i64>, opt_f: Option<f64>, opt_s: Option<&str>, untyped: Option<&Bound<'_, PyAny>>, compound: Option<&str>, bad_inf: Option<f64>, bare_dot: Option<f64>)"
+            ),
+            "{lib}"
+        );
+
+        // TASK.md notes must list the exact same parameters that fell back to None
+        // and must NOT complain about typed defaults (or explicit `= None`) emitted directly.
+        let dir = std::env::temp_dir().join(format!("fa-py-defaults-task-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let md = task_md(&hs, &[], &port(), &dir, 0);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(md.contains("`bad_b` defaults to `1`"), "{md}");
+        assert!(md.contains("`opt_const` defaults to `CONST`"), "{md}");
+        assert!(md.contains("`untyped` defaults to `5`"), "{md}");
+        assert!(md.contains("`compound` defaults to `\"a\" + \"b\"`"), "{md}");
+        assert!(md.contains("`bad_inf` defaults to `inf`"), "{md}");
+        assert!(md.contains("`bare_dot` defaults to `.5`"), "{md}");
+        assert!(!md.contains("`factor` defaults to"), "{md}");
+        assert!(!md.contains("`pos_i` defaults to"), "{md}");
+        assert!(!md.contains("`big_f` defaults to"), "{md}");
+        assert!(!md.contains("`sep` defaults to"), "{md}");
+        assert!(!md.contains("`cap` defaults to"), "{md}");
+        assert!(!md.contains("`opt_none` defaults to"), "{md}");
+
+        // Direct string literal parser checks (empty, octal, hex, unicode, rejection of bad escapes/compounds/surrogates).
+        assert_eq!(parse_py_str_literal(r#""""#).as_deref(), Some(""));
+        assert_eq!(parse_py_str_literal("''").as_deref(), Some(""));
+        assert_eq!(parse_py_str_literal("\""), None);
+        assert_eq!(parse_py_str_literal(r"'\n\t\r\\'\''").as_deref(), None);
+        assert_eq!(parse_py_str_literal(r"'\n\t\r\\\''").as_deref(), Some("\n\t\r\\'"));
+        assert_eq!(parse_py_str_literal(r"'\x41\u00e9\U0001f600\0'").as_deref(), Some("Aé😀\0"));
+        assert_eq!(parse_py_str_literal(r#""a" + "b""#), None);
+        assert_eq!(parse_py_str_literal(r"b'abc'"), None);
+        assert_eq!(parse_py_str_literal(r"'\q'"), None);
+        assert_eq!(parse_py_str_literal(r"'\ud800'"), None);
+        assert_eq!(parse_py_str_literal(r"'\x+a'"), None);
+        assert_eq!(parse_py_str_literal(r"'\u-001'"), None);
+        assert_eq!(rust_default("-.5", "f64"), None);
     }
 
     #[test]
