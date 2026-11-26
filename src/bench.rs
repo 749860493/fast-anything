@@ -126,6 +126,75 @@ pub struct BenchResult {
     /// or OUTPUT_VARIES.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_diff: Option<String>,
+    /// When and on what machine bench ran; results from older versions have none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
+}
+
+/// When and where a bench ran: a speedup means little without the machine it was measured on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Scope {
+    /// UTC, e.g. "2026-11-26".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// As Rust names them: "linux", "macos", "windows"; "x86_64", "aarch64".
+    pub os: String,
+    pub arch: String,
+    /// Logical CPUs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<usize>,
+    /// The CPU's model name, where the OS tells it cheaply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<String>,
+}
+
+impl Scope {
+    pub fn here() -> Scope {
+        Scope {
+            date: util::today(),
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+            cpus: std::thread::available_parallelism().ok().map(|n| n.get()),
+            cpu: cpu_model(),
+        }
+    }
+}
+
+/// The CPU's model name; None where it isn't cheap to get.
+fn cpu_model() -> Option<String> {
+    let found = if cfg!(target_os = "linux") {
+        std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|t| cpuinfo_model(&t))
+    } else if cfg!(target_os = "macos") {
+        printed("sysctl", &["-n", "machdep.cpu.brand_string"])
+    } else if cfg!(windows) {
+        let key = r"HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0";
+        printed("reg", &["query", key, "/v", "ProcessorNameString"])
+            .and_then(|t| registry_value(&t))
+            .or_else(|| std::env::var("PROCESSOR_IDENTIFIER").ok())
+    } else {
+        None
+    };
+    found.map(|m| m.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|m| !m.is_empty())
+}
+
+/// What a command prints, if it starts and succeeds.
+fn printed(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The first `model name` in /proc/cpuinfo (ARM kernels may have none).
+fn cpuinfo_model(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let (key, value) = l.split_once(':')?;
+        (key.trim() == "model name").then(|| value.trim().to_string())
+    })
+}
+
+/// The data in `reg query` output: `    ProcessorNameString    REG_SZ    Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz`.
+fn registry_value(text: &str) -> Option<String> {
+    text.lines().find_map(|l| l.split_once("REG_SZ").map(|(_, v)| v.trim().to_string()))
 }
 
 impl BenchResult {
@@ -437,6 +506,7 @@ pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
         runs,
         ports,
         output_diff: check.diff(),
+        scope: Some(Scope::here()),
         ..summarize(&wall, &cpu)
     })
 }
@@ -535,6 +605,17 @@ mod tests {
         varies.see(false, b"took 0.1s\n");
         varies.see(true, b"took 1.3s\n");
         assert_eq!(varies.diff().as_deref(), Some(OUTPUT_VARIES));
+    }
+
+    #[test]
+    fn the_machine_is_named_when_it_tells() {
+        let cpuinfo = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 5 PRO 4650GE with Radeon Graphics\nflags\t\t: fpu\n\nprocessor\t: 1\nmodel name\t: other\n";
+        assert_eq!(cpuinfo_model(cpuinfo).as_deref(), Some("AMD Ryzen 5 PRO 4650GE with Radeon Graphics"));
+        assert_eq!(cpuinfo_model("processor\t: 0\nBogoMIPS\t: 48.00\n"), None);
+        let reg = "\r\nHKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0\r\n    ProcessorNameString    REG_SZ    Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz\r\n\r\n";
+        assert_eq!(registry_value(reg).as_deref(), Some("Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz"));
+        let here = Scope::here();
+        assert!(here.date.is_some() && !here.os.is_empty() && here.cpus.is_some_and(|n| n > 0), "{here:?}");
     }
 
     #[test]

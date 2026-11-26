@@ -172,6 +172,25 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
+/// Year, month and day of a day counted from 1970-01-01 (proleptic Gregorian calendar).
+pub fn civil_date(days: i64) -> (i64, u32, u32) {
+    // years run March to February here, so the leap day comes last
+    let z = days + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (day, month) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    (yoe + era * 400 + i64::from(month <= 2), month as u32, day as u32)
+}
+
+/// Today's date in UTC, e.g. "2026-11-26"; None if the clock is before 1970.
+pub fn today() -> Option<String> {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let (y, m, d) = civil_date((secs / 86_400) as i64);
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +211,19 @@ mod tests {
         assert_eq!(slug("text.utils.Lev-1"), "text_utils_lev_1");
         assert_eq!(nanos(350.0), "350ns");
         assert_eq!(secs(0.25), "250ms");
+    }
+
+    #[test]
+    fn days_since_1970_become_dates() {
+        assert_eq!(civil_date(0), (1970, 1, 1));
+        assert_eq!(civil_date(10_956), (1999, 12, 31));
+        assert_eq!(civil_date(11_016), (2000, 2, 29), "a leap day in a year divisible by 400");
+        assert_eq!(civil_date(19_782), (2024, 2, 29));
+        assert_eq!(civil_date(19_783), (2024, 3, 1));
+        assert_eq!(civil_date(20_783), (2026, 11, 26));
+        assert_eq!((civil_date(47_540), civil_date(47_541)), ((2100, 2, 28), (2100, 3, 1)), "2100 has no leap day");
+        assert_eq!(civil_date(-1), (1969, 12, 31));
+        let today = today().unwrap();
+        assert!(today.len() == 10 && today.starts_with("20"), "{today}");
     }
 }
