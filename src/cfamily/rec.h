@@ -12,6 +12,7 @@ void fa_rec_begin(void);
 void fa_rec_i64(long long v);
 void fa_rec_u64(unsigned long long v);
 void fa_rec_f64(double v);
+int fa_rec_same_f64(double a, double b);
 void fa_rec_bool(int v);
 void fa_rec_str(const char *s);
 void fa_rec_arr_i64(const void *p, size_t n, int size, int is_signed);

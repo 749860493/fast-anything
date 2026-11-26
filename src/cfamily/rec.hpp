@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <string>
 #include <tuple>
@@ -91,9 +92,13 @@ template <class T> typename std::enable_if<std::is_arithmetic<T>::value, std::ve
     if (std::is_same<T, bool>::value) return out;
     std::vector<double> xs = {0, 1};
     if (std::is_signed<T>::value) xs.push_back(-1);
-    if (std::is_floating_point<T>::value) xs.push_back(sizeof(T) >= 8 ? 1e300 : 1e30);
+    if (std::is_floating_point<T>::value) {
+        const double inf = std::numeric_limits<double>::infinity();
+        xs.insert(xs.end(), {sizeof(T) >= 8 ? 1e300 : 1e30, std::numeric_limits<double>::quiet_NaN(), inf, -inf, -0.0});
+    }
+    // -0.0 isn't the recorded 0.0
     for (double x : xs)
-        if ((T) x != v) out.push_back((T) x);
+        if ((T) x != v || std::signbit(x) != std::signbit((double) v)) out.push_back((T) x);
     return out;
 }
 inline std::vector<std::string> edges(const std::string &v) {
@@ -114,7 +119,7 @@ template <class T, class Al> std::vector<std::vector<T, Al>> edges(const std::ve
     if (v.empty()) return out;
     out.emplace_back();
     auto es = edges(v[0]);
-    for (size_t k = 0; k < es.size() && k < 4; k++) {
+    for (size_t k = 0; k < es.size() && (k < 4 || std::is_floating_point<T>::value); k++) {
         out.push_back(v);
         out.back()[0] = es[k];
     }

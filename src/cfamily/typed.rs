@@ -3,13 +3,15 @@
 // fa_typed takes the C function's arguments as plain C values. They reach the port through serde's
 // value deserializers, so its parameter types read them as they read JSON, and the result comes back
 // through a serializer that takes one number or bool. The rest is for verify: JSON arguments turned
-// into the C values the bridge passes, so the replay checks and times what the app calls.
+// into the C values the bridge passes, so the replay checks and times what the app calls. NaN and
+// infinity are recorded as the JSON entry point reads them (see wire_float), and come back that way.
 
 use serde::de::IntoDeserializer;
 use serde::de::value::{Error, SeqDeserializer};
 use serde::ser::{Impossible, Serialize, Serializer};
 use serde_json::{Value, json};
 use std::ffi::{CStr, CString, c_char};
+use super::{WireOut, wire_float};
 
 /// Argument i, as the port's type.
 pub(super) fn typed_arg<'de, T, D>(i: usize, d: D) -> Result<T, String>
@@ -110,7 +112,7 @@ impl TypedWide for f64 {
         }
     }
     fn json(self) -> Value {
-        json!(self)
+        serde_json::to_value(WireOut(&self)).unwrap_or_default()
     }
 }
 
@@ -260,8 +262,13 @@ pub(super) fn typed_uint<T: TryFrom<u64>>(v: &Value) -> Option<T> {
     T::try_from(v.as_u64()?).ok()
 }
 
+/// A float, or NaN or infinity, tagged.
+pub(super) fn typed_f64(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| wire_float(v))
+}
+
 pub(super) fn typed_f32(v: &Value) -> Option<f32> {
-    v.as_f64().map(|x| x as f32)
+    typed_f64(v).map(|x| x as f32)
 }
 
 /// A bool, recorded as true/false (or 0/1 in an array).

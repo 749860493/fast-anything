@@ -1072,14 +1072,21 @@ fn c_record_prologue(hs: &Hotspot) -> Result<String> {
 fn c_edges(hs: &Hotspot, kinds: &[CKind], sfx: &str, cast: &str) -> String {
     let names = arg_names(hs);
     let annot = |i: usize| hs.params[i].annotation.clone().unwrap_or_else(|| "int".into());
+    // NaN and infinity from builtins, so the app's file needn't include math.h
     let numbers = |s: Scalar| -> Option<&'static str> {
         match s {
             Scalar::Int { signed: true, .. } => Some("0, 1, -1"),
             Scalar::Int { signed: false, .. } => Some("0, 1"),
-            Scalar::Float("f32") => Some("0, 1, -1, 1e30"),
-            Scalar::Float(_) => Some("0, 1, -1, 1e300"),
+            Scalar::Float("f32") => {
+                Some("0, 1, -1, 1e30, __builtin_nan(\"\"), __builtin_inf(), -__builtin_inf(), -0.0")
+            }
+            Scalar::Float(_) => Some("0, 1, -1, 1e300, __builtin_nan(\"\"), __builtin_inf(), -__builtin_inf(), -0.0"),
             Scalar::Bool => None,
         }
+    };
+    let same = |s: Scalar, a: &str, b: &str| match s {
+        Scalar::Float(_) => format!("fa_rec_same_f64((double) {a}, (double) {b})"),
+        _ => format!("{a} == {b}"),
     };
     let mut base = names.clone();
     let (mut prep, mut free) = (String::new(), String::new());
@@ -1130,7 +1137,8 @@ fn c_edges(hs: &Hotspot, kinds: &[CKind], sfx: &str, cast: &str) -> String {
                 let Some(list) = numbers(*s) else { continue };
                 let ty = annot(i);
                 body.push_str(&format!(
-                    "        {{\n            static const double fa_e[] = {{{list}}};\n            for (int fa_k = 0; fa_k < (int) (sizeof fa_e / sizeof *fa_e) && fa_rec_edge_ok(); fa_k++) {{\n                {ty} fa_v = ({ty}) fa_e[fa_k];\n                if (fa_v == {name}) continue;\n                {}\n            }}\n        }}\n",
+                    "        {{\n            static const double fa_e[] = {{{list}}};\n            for (int fa_k = 0; fa_k < (int) (sizeof fa_e / sizeof *fa_e) && fa_rec_edge_ok(); fa_k++) {{\n                {ty} fa_v = ({ty}) fa_e[fa_k];\n                if ({}) continue;\n                {}\n            }}\n        }}\n",
+                    same(*s, "fa_v", name),
                     case(&[(i, "fa_v".into())], true)
                 ));
             }
@@ -1149,7 +1157,8 @@ fn c_edges(hs: &Hotspot, kinds: &[CKind], sfx: &str, cast: &str) -> String {
                 ));
                 if let Some(list) = numbers(*s) {
                     body.push_str(&format!(
-                        "        if (fa_l{l} > 0) {{\n            static const double fa_e[] = {{{list}}};\n            {elem} *fa_c = ({elem} *) fa_rec_dup({name}, fa_l{l}, sizeof *({name}));\n            for (int fa_k = 0; fa_k < (int) (sizeof fa_e / sizeof *fa_e) && fa_rec_edge_ok(); fa_k++) {{\n                fa_c[0] = ({elem}) fa_e[fa_k];\n                if (fa_c[0] == ({name})[0]) continue;\n                {}\n            }}\n            fa_rec_free(fa_c);\n        }}\n",
+                        "        if (fa_l{l} > 0) {{\n            static const double fa_e[] = {{{list}}};\n            {elem} *fa_c = ({elem} *) fa_rec_dup({name}, fa_l{l}, sizeof *({name}));\n            for (int fa_k = 0; fa_k < (int) (sizeof fa_e / sizeof *fa_e) && fa_rec_edge_ok(); fa_k++) {{\n                fa_c[0] = ({elem}) fa_e[fa_k];\n                if ({}) continue;\n                {}\n            }}\n            fa_rec_free(fa_c);\n        }}\n",
+                        same(*s, "fa_c[0]", &format!("({name})[0]")),
                         case(&[(i, "fa_c".into())], true)
                     ));
                 }
@@ -1228,7 +1237,7 @@ pub const FLAVOR_C: Flavor = Flavor {
         "Floats: compilers may fuse `a * b + c` into one FMA instruction (clang does on ARM), which rounds differently. If recorded results differ in the last digits, the original was built that way: use `f64::mul_add` there, or build the app with `-ffp-contract=off`.",
         "Returns are numbers or bools. Undefined behavior in the original (overflow of signed ints, out-of-bounds reads) isn't a spec: match the defined cases.",
     ],
-    floats: None,
+    floats: Some(native::FLOATS),
 };
 
 pub const FLAVOR_CPP: Flavor = Flavor {
@@ -1242,7 +1251,7 @@ pub const FLAVOR_CPP: Flavor = Flavor {
         "`std::vector` is Vec, `std::array<T, N>` is `[T; N]`, `std::map<std::string, T>` is BTreeMap (same key order), `std::pair` is a tuple.",
         "Return `Err(message)` where the original throws.",
     ],
-    floats: None,
+    floats: Some(native::FLOATS),
 };
 
 fn flavor(port: &Port) -> &'static Flavor {
@@ -1264,19 +1273,17 @@ fn glue(hs: &Hotspot, port: &Port) -> String {
     if port.lang == Lang::C { json + &typed_glue(hs).unwrap_or_default() } else { json }
 }
 
-/// A C crate whose glue predates fa_typed (or differs otherwise) gets it regenerated and rebuilt,
-/// so this replay checks what the bridge will call. Its sources changed, so enable asks for one
-/// more verify.
+/// A crate whose glue predates what the bridge sends (C's fa_typed, tagged NaN and infinity) or
+/// differs otherwise gets it regenerated and rebuilt, so this replay checks what the bridge will
+/// call. Its sources changed, so enable asks for one more verify.
 pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
-    if port.lang == Lang::C
-        && let Some(hs) = ctx.state.hotspots.iter().find(|h| h.id == port.id)
-    {
+    if let Some(hs) = ctx.state.hotspots.iter().find(|h| h.id == port.id) {
         let lib_rs = ctx.crate_dir(port).join("src").join("lib.rs");
         let glue = glue(hs, port);
         if fs::read_to_string(&lib_rs).is_ok_and(|t| t != glue) {
             fs::write(&lib_rs, &glue)?;
             ui::warn(format!(
-                "regenerated {}'s src/lib.rs (generated glue) so C calls skip JSON; verify again before enable",
+                "regenerated {}'s src/lib.rs (generated glue) to match the bridge; verify again before enable",
                 port.id
             ));
             if let Err(log) = backend::build(ctx, port)? {
@@ -1300,7 +1307,7 @@ struct TypedParam {
     read: String,
     held: String,
     pass: String,
-    /// In the bridge: the value passed, and what runs the C version instead (NaN, NULL).
+    /// In the bridge: the value passed, and what runs the C version instead (a NULL string).
     arg: String,
     check: String,
 }
@@ -1372,11 +1379,11 @@ fn typed_params(hs: &Hotspot) -> Option<Vec<TypedParam>> {
                 rust: "f64".into(),
                 c: "double".into(),
                 port: format!("typed_arg({i}, a{i}.into_deserializer())?"),
-                read: "Value::as_f64".into(),
+                read: "typed_f64".into(),
                 held: "f64".into(),
                 pass: format!("x.{i}"),
                 arg: format!("(double) ({n})"),
-                check: format!("    if (!isfinite({n})) return 0;\n"),
+                check: String::new(),
             },
             CKind::Scalar(Scalar::Bool) => TypedParam {
                 rust: "i32".into(),
@@ -1404,13 +1411,8 @@ fn typed_params(hs: &Hotspot) -> Option<Vec<TypedParam>> {
                     Scalar::Int { signed: true, .. } => (".map(|&x| x as i64)", format!("typed_int::<{item}>")),
                     Scalar::Int { signed: false, .. } => (".map(|&x| x as u64)", format!("typed_uint::<{item}>")),
                     Scalar::Float(_) if item == "f32" => (".map(|&x| f64::from(x))", "typed_f32".into()),
-                    Scalar::Float(_) => (".copied()", "Value::as_f64".into()),
+                    Scalar::Float(_) => (".copied()", "typed_f64".into()),
                     Scalar::Bool => (".copied()", "typed_bool".into()),
-                };
-                let l = &hs.params[*len].name;
-                let lt = match scalar(hs.params[*len].annotation.as_deref().unwrap_or("")) {
-                    Some(Scalar::Int { signed: false, .. }) => "unsigned long long",
-                    _ => "long long",
                 };
                 TypedParam {
                     rust: format!("*const {item}"),
@@ -1420,13 +1422,7 @@ fn typed_params(hs: &Hotspot) -> Option<Vec<TypedParam>> {
                     held: format!("Vec<{item}>"),
                     pass: format!("x.{i}.as_ptr()"),
                     arg: n.clone(),
-                    check: if matches!(s, Scalar::Float(_)) {
-                        format!(
-                            "    if ({n}) for ({lt} fa_i = 0; fa_i < ({lt}) ({l}); fa_i++) if (!isfinite({n}[fa_i])) return 0;\n"
-                        )
-                    } else {
-                        String::new()
-                    },
+                    check: String::new(),
                 }
             }
         });
@@ -1561,7 +1557,6 @@ fn c_typed_bridge(hs: &Hotspot, ps: &[TypedParam], s: &str, lib: &str) -> String
     let (_, wide) = typed_wide(&ret);
     format!(
         r#"/* Calls the verified Rust port of {id}. FAST_ANYTHING_DISABLE=1 runs the C version instead. */
-#include <math.h>
 #include <stdlib.h>
 {loader}
 static int (*fa_typed_{s})({wide} *{types});
@@ -1615,13 +1610,13 @@ fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
         puts.push_str(&match k {
             CKind::Scalar(Scalar::Int { signed: true, .. }) | CKind::Len => format!("    fa_int_S(&fa_b, (long long) ({n}));\n"),
             CKind::Scalar(Scalar::Int { signed: false, .. }) => format!("    fa_uint_S(&fa_b, (unsigned long long) ({n}));\n"),
-            CKind::Scalar(Scalar::Float(_)) => format!("    if (!fa_dbl_S(&fa_b, (double) ({n}))) goto fa_fallback;\n"),
+            CKind::Scalar(Scalar::Float(_)) => format!("    fa_dbl_S(&fa_b, (double) ({n}));\n"),
             CKind::Scalar(Scalar::Bool) => format!("    fa_put_S(&fa_b, ({n}) ? \"true\" : \"false\");\n"),
-            CKind::Str => format!("    if (!fa_str_S(&fa_b, {n})) goto fa_fallback;\n"),
+            CKind::Str => format!("    fa_str_S(&fa_b, {n});\n"),
             CKind::Array(sc, len) => {
                 let l = &hs.params[*len].name;
                 let item = match sc {
-                    Scalar::Float(_) => format!("if (!fa_dbl_S(&fa_b, (double) {n}[fa_i])) goto fa_fallback;"),
+                    Scalar::Float(_) => format!("fa_dbl_S(&fa_b, (double) {n}[fa_i]);"),
                     Scalar::Int { signed: true, .. } => format!("fa_int_S(&fa_b, (long long) {n}[fa_i]);"),
                     Scalar::Int { signed: false, .. } => format!("fa_uint_S(&fa_b, (unsigned long long) {n}[fa_i]);"),
                     Scalar::Bool => format!("fa_put_S(&fa_b, {n}[fa_i] ? \"true\" : \"false\");"),
@@ -1632,7 +1627,10 @@ fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
     }
     let parse = match scalar(&ret) {
         Some(Scalar::Bool) => "strncmp(fa_reply, \"true\", 4) == 0".to_string(),
-        Some(Scalar::Float(_)) => format!("({ret}) strtod(fa_reply, NULL)"),
+        // NaN and infinity come back as {"$float": name}
+        Some(Scalar::Float(_)) => format!(
+            r#"({ret}) (strncmp(fa_reply, "{{\"$float\":\"", 11) ? strtod(fa_reply, NULL) : fa_reply[11] == 'N' ? NAN : fa_reply[11] == 'I' ? INFINITY : -INFINITY)"#
+        ),
         Some(Scalar::Int { signed: false, .. }) => format!("({ret}) strtoull(fa_reply, NULL, 10)"),
         _ => format!("({ret}) strtoll(fa_reply, NULL, 10)"),
     };
@@ -1667,16 +1665,18 @@ static void fa_put_S(fa_buf_S *b, const char *s) {{
 }}
 static void fa_int_S(fa_buf_S *b, long long v) {{ char t[32]; snprintf(t, sizeof t, "%lld", v); fa_put_S(b, t); }}
 static void fa_uint_S(fa_buf_S *b, unsigned long long v) {{ char t[32]; snprintf(t, sizeof t, "%llu", v); fa_put_S(b, t); }}
-static int fa_dbl_S(fa_buf_S *b, double v) {{
+/* JSON has no NaN or infinity: the port's glue reads them as {{"$float": name}} */
+static void fa_dbl_S(fa_buf_S *b, double v) {{
     char t[40];
-    if (!isfinite(v)) return 0;
+    if (isnan(v)) {{ fa_put_S(b, "{{\"$float\":\"NaN\"}}"); return; }}
+    if (isinf(v)) {{ fa_put_S(b, v > 0 ? "{{\"$float\":\"Infinity\"}}" : "{{\"$float\":\"-Infinity\"}}"); return; }}
     snprintf(t, sizeof t, "%.17g", v);
+    if (!strpbrk(t, ".eE")) strcat(t, ".0");
     fa_put_S(b, t);
-    return 1;
 }}
-static int fa_str_S(fa_buf_S *b, const char *s) {{
+static void fa_str_S(fa_buf_S *b, const char *s) {{
     char t[8] = {{0}};
-    if (!s) {{ fa_put_S(b, "null"); return 1; }}
+    if (!s) {{ fa_put_S(b, "null"); return; }}
     fa_put_S(b, "\"");
     for (; *s; s++) {{
         unsigned char c = (unsigned char) *s;
@@ -1686,7 +1686,6 @@ static int fa_str_S(fa_buf_S *b, const char *s) {{
         fa_put_S(b, t);
     }}
     fa_put_S(b, "\"");
-    return 1;
 }}
 /* Sets *fa_ok to 0 (and the C version runs) if the port can't answer. */
 {ret} fa_fast_S(int *fa_ok, {params}) {{
@@ -1711,7 +1710,6 @@ static int fa_str_S(fa_buf_S *b, const char *s) {{
         *fa_ok = 1;
     }}
     free(fa_text);
-fa_fallback:
     free(fa_b.p);
     return fa_r;
 }}"#,
@@ -1737,6 +1735,7 @@ fn cpp_bridge(hs: &Hotspot, s: &str, lib: &str, namespaces: &[String]) -> String
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -2097,11 +2096,13 @@ mod tests {
         );
     }
 
-    /// A C project in a temp folder: scanned, each (id, port.rs) ported and built, then all enabled.
-    /// None without a C compiler or cargo.
+    /// A C or C++ project in a temp folder: scanned, each (id, port.rs) ported and built, then all
+    /// enabled. None without a compiler or cargo.
     #[cfg(unix)]
     fn enabled_c_project(tag: &str, files: &[(&str, &str)], ports: &[(&str, &str)]) -> Option<(PathBuf, &'static str)> {
-        let cc = ["cc", "gcc", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())?;
+        let cpp = files.iter().any(|f| is_cpp_file(f.0));
+        let compilers = if cpp { ["c++", "g++", "clang++"] } else { ["cc", "gcc", "clang"] };
+        let cc = compilers.into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())?;
         Command::new("cargo").arg("--version").output().ok()?;
         let dir = std::env::temp_dir().canonicalize().unwrap().join(format!("fa-c-typed-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -2109,7 +2110,8 @@ mod tests {
         for (name, text) in files {
             fs::write(dir.join(name), text).unwrap();
         }
-        let command = [cc, "-O2"].into_iter().chain(files.iter().map(|f| f.0)).map(String::from).collect();
+        let flags: &[&str] = if cpp { &["-O2", "-std=c++17"] } else { &["-O2"] };
+        let command = [cc].iter().chain(flags).chain(files.iter().map(|f| &f.0)).map(|s| s.to_string()).collect();
         crate::pipeline::scan(&dir, command, None).unwrap();
         for (id, port_rs) in ports {
             let out = crate::pipeline::port(&dir, Some(id), 200).unwrap();
@@ -2127,7 +2129,9 @@ mod tests {
     /// Builds the sources in dir and runs them; FAST_ANYTHING_DISABLE=1 with `disable`.
     #[cfg(unix)]
     fn run_c(dir: &Path, cc: &str, sources: &[&str], disable: bool) -> String {
-        let built = Command::new(cc).arg("-O2").args(sources).args(["-o", "app"]).current_dir(dir).output().unwrap();
+        let std: &[&str] = if sources.iter().any(|s| is_cpp_file(s)) { &["-std=c++17"] } else { &[] };
+        let built =
+            Command::new(cc).arg("-O2").args(std).args(sources).args(["-o", "app"]).current_dir(dir).output().unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
         let mut cmd = Command::new(dir.join("app"));
         if disable {
@@ -2154,29 +2158,177 @@ mod tests {
         serde_json::from_str(&fs::read_to_string(crate_dir.join("verify.json")).unwrap()).unwrap()
     }
 
+    /// The calls recorded for a port, derived ones included.
+    #[cfg(unix)]
+    fn recorded(dir: &Path, id: &str) -> Vec<Value> {
+        let ctx = Ctx::open(dir).unwrap();
+        let text = fs::read_to_string(ctx.crate_dir(&ctx.state.ports[id]).join("recordings.jsonl")).unwrap();
+        text.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    /// verify's replay of the port rebuilt from another port.rs.
+    #[cfg(unix)]
+    fn replay_other(dir: &Path, id: &str, port_rs: &str) -> Verify {
+        let ctx = Ctx::open(dir).unwrap();
+        let port = &ctx.state.ports[id];
+        fs::write(ctx.crate_dir(port).join("src").join("port.rs"), port_rs).unwrap();
+        let built = backend::build(&ctx, port).unwrap();
+        assert!(built.is_ok(), "{id}: {built:?}");
+        replay(dir, id)
+    }
+
+    /// {"$float": name}, how NaN and infinity are recorded.
+    #[cfg(unix)]
+    fn tagged(name: &str) -> Value {
+        serde_json::json!({ "$float": name })
+    }
+
     #[cfg(unix)]
     #[test]
     fn nan_and_infinity_reach_the_c_app_as_they_are() {
-        let ranges = "/* Mean of [lo, hi) over w: NaN for an empty range (0/0), infinite for w == 0. */\ndouble weighted_mean(long long lo, long long hi, double w) {\n    double s = 0.0;\n    for (long long i = lo; i < hi; i++) s += (double) i;\n    return s / (double) (hi - lo) / w;\n}\n";
-        let main = "#include <math.h>\n#include <stdio.h>\ndouble weighted_mean(long long lo, long long hi, double w);\nint main(void) {\n    double total = 0.0;\n    int empty = 0, infinite = 0;\n    for (int k = 0; k < 4000; k++) {\n        long long lo = k * 37 % 1000, hi = lo + (k % 50) * 20;\n        double m = weighted_mean(lo, hi, (double) (k % 7));\n        if (isnan(m)) empty++;\n        else if (isinf(m)) infinite++;\n        else total += m;\n    }\n    printf(\"total %.3f, empty %d, infinite %d\\n\", total, empty, infinite);\n    return 0;\n}\n";
-        let port = "pub fn weighted_mean(lo: i64, hi: i64, w: f64) -> Result<f64, String> {\n    let n = hi - lo;\n    let s = if n > 0 { ((lo + hi - 1) * n / 2) as f64 } else { 0.0 };\n    Ok(s / n as f64 / w)\n}\n";
-        let Some((dir, cc)) =
-            enabled_c_project("nan", &[("ranges.c", ranges), ("main.c", main)], &[("ranges.weighted_mean", port)])
-        else {
+        let ranges = "#include <stddef.h>\n/* Mean of [lo, hi) over w: NaN for an empty range (0/0), infinite for w == 0. */\ndouble weighted_mean(long long lo, long long hi, double w) {\n    double s = 0.0;\n    for (long long i = lo; i < hi; i++) s += (double) i;\n    return s / (double) (hi - lo) / w;\n}\n/* Sum of xs: NaN or infinite when one of them is. */\ndouble total(const double *xs, size_t n) {\n    double s = 0.0;\n    for (size_t i = 0; i < n; i++) s += xs[i];\n    return s;\n}\n";
+        let main = "#include <math.h>\n#include <stddef.h>\n#include <stdio.h>\ndouble weighted_mean(long long lo, long long hi, double w);\ndouble total(const double *xs, size_t n);\nint main(void) {\n    double sum = 0.0, ms[8];\n    int empty = 0, infinite = 0, odd = 0;\n    for (int k = 0; k < 4000; k++) {\n        long long lo = k * 37 % 1000, hi = lo + (k % 50) * 20;\n        double m = weighted_mean(lo, hi, (double) (k % 23));\n        if (isnan(m)) empty++;\n        else if (isinf(m)) infinite++;\n        else sum += m;\n        ms[k % 8] = m;\n        if (k % 8 == 7) {\n            double t = total(ms, 8);\n            if (isfinite(t)) sum += t;\n            else odd++;\n        }\n    }\n    printf(\"total %.3f, empty %d, infinite %d, sums not finite %d\\n\", sum, empty, infinite, odd);\n    return 0;\n}\n";
+        let mean = "pub fn weighted_mean(lo: i64, hi: i64, w: f64) -> Result<f64, String> {\n    let n = hi - lo;\n    let s = if n > 0 { ((lo + hi - 1) * n / 2) as f64 } else { 0.0 };\n    Ok(s / n as f64 / w)\n}\n";
+        let total = "pub fn total(xs: Vec<f64>, _n: u64) -> Result<f64, String> {\n    Ok(xs.iter().fold(0.0, |s, x| s + x))\n}\n";
+        let ids = ["ranges.weighted_mean", "ranges.total"];
+        let files = [("ranges.c", ranges), ("main.c", main)];
+        let Some((dir, cc)) = enabled_c_project("nan", &files, &[(ids[0], mean), (ids[1], total)]) else {
             eprintln!("no C compiler or cargo on PATH, skipping");
             return;
         };
-        // the port answers NaN and infinity itself, not the C version
-        let check = "#include <math.h>\n#include <stdio.h>\nint fa_on_S(void);\ndouble fa_fast_S(int *, long long lo, long long hi, double w);\nint main(void) {\n    int on = fa_on_S(), a = 0, b = 0;\n    double x = fa_fast_S(&a, 5, 5, 1.0), y = fa_fast_S(&b, 1, 4, 0.0);\n    printf(\"%d %d %d %d %d\\n\", on, a, isnan(x) != 0, b, isinf(y) != 0);\n    return 0;\n}\n";
-        fs::write(dir.join("check.c"), check.replace("_S", &format!("_{}", util::slug("ranges.weighted_mean"))))
-            .unwrap();
+        // recorded as they are, results and arguments (in arrays too), and NaN and infinity are edge cases
+        let (means, totals) = (recorded(&dir, ids[0]), recorded(&dir, ids[1]));
+        let real = |c: &&Value| c.get("derived").is_none();
+        let edge = |c: &&Value| c["derived"] == "edge";
+        let verified = (replay(&dir, ids[0]), replay(&dir, ids[1]));
+        // the port answers NaN and infinity itself, not the C version, and takes them too
+        let check = "#include <math.h>\n#include <stddef.h>\n#include <stdio.h>\nint fa_on_W(void);\nint fa_on_T(void);\ndouble fa_fast_W(int *, long long lo, long long hi, double w);\ndouble fa_fast_T(int *, const double *xs, size_t n);\nint main(void) {\n    int on = fa_on_W() + fa_on_T(), ok[5];\n    double xs[3] = {1.5, NAN, 2.0}, ys[2] = {-INFINITY, 1.0};\n    double a = fa_fast_W(&ok[0], 5, 5, 1.0), b = fa_fast_W(&ok[1], 1, 4, 0.0), c = fa_fast_W(&ok[2], 1, 4, NAN);\n    double d = fa_fast_T(&ok[3], xs, 3), e = fa_fast_T(&ok[4], ys, 2);\n    printf(\"%d %d %d %d %d %d\", on, isnan(a) != 0, isinf(b) != 0, isnan(c) != 0, isnan(d) != 0, isinf(e) && e < 0);\n    for (int i = 0; i < 5; i++) printf(\" %d\", ok[i]);\n    printf(\"\\n\");\n    return 0;\n}\n";
+        let check = check
+            .replace("_W(", &format!("_{}(", util::slug(ids[0])))
+            .replace("_T(", &format!("_{}(", util::slug(ids[1])));
+        fs::write(dir.join("check.c"), check).unwrap();
         let original = run_c(&dir, cc, &["main.c", "ranges.c"], true);
         let enabled = run_c(&dir, cc, &["main.c", "ranges.c"], false);
         let checked = run_c(&dir, cc, &["check.c", "ranges.c"], false);
+        // 0.0 for an empty range, where the original returns NaN: verify passed it while NaN wasn't recorded
+        let wrong = mean.replace("Ok(s / n as f64 / w)", "Ok(if n == 0 { 0.0 } else { s / n as f64 / w })");
+        let caught = replay_other(&dir, ids[0], &wrong);
         let _ = fs::remove_dir_all(&dir);
-        assert!(original.contains("empty 80, infinite 560"), "{original}");
+        assert!(means.iter().filter(real).any(|c| c["result"] == tagged("NaN")), "{means:?}");
+        assert!(means.iter().filter(real).any(|c| c["result"] == tagged("Infinity")), "{means:?}");
+        for name in ["NaN", "Infinity", "-Infinity"] {
+            assert!(means.iter().filter(edge).any(|c| c["args"][2] == tagged(name)), "{name}: {means:?}");
+            assert!(totals.iter().filter(edge).any(|c| c["args"][0][0] == tagged(name)), "{name}: {totals:?}");
+        }
+        let negative_zero = |v: &Value| v.as_f64().is_some_and(|x| x == 0.0 && x.is_sign_negative());
+        assert!(means.iter().filter(edge).any(|c| negative_zero(&c["args"][2])), "{means:?}");
+        let holds = |c: &Value, name: &str| c["args"][0].as_array().unwrap().contains(&tagged(name));
+        assert!(totals.iter().filter(real).any(|c| holds(c, "NaN") && c["result"] == tagged("NaN")), "{totals:?}");
+        assert!(totals.iter().filter(real).any(|c| holds(c, "Infinity") && c["result"] == tagged("Infinity")));
+        for v in [&verified.0, &verified.1] {
+            assert!(v.total > 0 && v.passed == v.total, "{v:?}");
+        }
+        assert!(caught.failed > 0 && caught.failures.iter().any(|f| f.expected == r#"{"$float":"NaN"}"#), "{caught:?}");
+        assert!(original.contains("empty 80, infinite 170"), "{original}");
         assert_eq!(enabled, original);
-        assert_eq!(checked, "1 1 1 1 1\n");
+        assert_eq!(checked, "2 1 1 1 1 1 1 1 1 1 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nan_and_infinity_reach_the_cpp_app_as_they_are() {
+        let ranges = "#include <limits>\n#include <utility>\n#include <vector>\n// Mean of xs over w (NaN when xs is empty, infinite for w == 0) and the smallest of xs.\nstd::pair<double, double> stats(const std::vector<double> &xs, double w) {\n    double s = 0.0, low = std::numeric_limits<double>::infinity();\n    for (double x : xs) {\n        s += x;\n        if (x < low) low = x;\n    }\n    return {s / (double) xs.size() / w, low};\n}\n";
+        let main = "#include <cmath>\n#include <cstdio>\n#include <utility>\n#include <vector>\nstd::pair<double, double> stats(const std::vector<double> &xs, double w);\nint main() {\n    double total = 0.0;\n    int empty = 0, infinite = 0;\n    for (int k = 0; k < 4000; k++) {\n        std::vector<double> xs;\n        for (int i = 0; i < (k % 50) * 4; i++) xs.push_back((k * 37 + i) % 1000 * 0.5);\n        std::pair<double, double> m = stats(xs, (double) (k % 23));\n        if (std::isnan(m.first)) empty++;\n        else if (std::isinf(m.first)) infinite++;\n        else total += m.first;\n        if (!std::isinf(m.second)) total += m.second;\n    }\n    std::printf(\"total %.3f, empty %d, infinite %d\\n\", total, empty, infinite);\n    return 0;\n}\n";
+        let port = "pub fn stats(xs: Vec<f64>, w: f64) -> Result<(f64, f64), String> {\n    let s = xs.iter().fold(0.0, |s, x| s + x);\n    let low = xs.iter().fold(f64::INFINITY, |m, &x| if x < m { x } else { m });\n    Ok((s / xs.len() as f64 / w, low))\n}\n";
+        let id = "ranges.stats";
+        let Some((dir, cc)) =
+            enabled_c_project("nan-cpp", &[("ranges.cpp", ranges), ("main.cpp", main)], &[(id, port)])
+        else {
+            eprintln!("no C++ compiler or cargo on PATH, skipping");
+            return;
+        };
+        let cases = recorded(&dir, id);
+        let verified = replay(&dir, id);
+        // the port answers NaN and infinity itself, also inside the vector and the pair
+        let check = "#include <cmath>\n#include <cstdio>\n#include <utility>\n#include <vector>\nbool fa_on_S();\nbool fa_fast_S(std::pair<double, double> &, const std::vector<double> &xs, double w);\nint main() {\n    std::pair<double, double> a, b, c;\n    bool x = fa_fast_S(a, {}, 1.0), y = fa_fast_S(b, {1.0, 2.0}, 0.0), z = fa_fast_S(c, {1.0, NAN, -INFINITY}, NAN);\n    std::printf(\"%d %d %d %d %d %d %d\\n\", fa_on_S(), x, y, z, std::isnan(a.first) && std::isinf(a.second) && a.second > 0,\n                std::isinf(b.first) && b.second == 1.0, std::isnan(c.first) && std::isinf(c.second) && c.second < 0);\n    return 0;\n}\n";
+        fs::write(dir.join("check.cpp"), check.replace("_S(", &format!("_{}(", util::slug(id)))).unwrap();
+        let original = run_c(&dir, cc, &["main.cpp", "ranges.cpp"], true);
+        let enabled = run_c(&dir, cc, &["main.cpp", "ranges.cpp"], false);
+        let checked = run_c(&dir, cc, &["check.cpp", "ranges.cpp"], false);
+        let empty_is_zero = "Ok((if xs.is_empty() { 0.0 } else { s / xs.len() as f64 / w }, low))";
+        let wrong = port.replace("Ok((s / xs.len() as f64 / w, low))", empty_is_zero);
+        let caught = replay_other(&dir, id, &wrong);
+        let _ = fs::remove_dir_all(&dir);
+        let real = |c: &&Value| c.get("derived").is_none();
+        let edge = |c: &&Value| c["derived"] == "edge";
+        let empty = serde_json::json!([tagged("NaN"), tagged("Infinity")]);
+        assert!(cases.iter().filter(real).any(|c| c["args"][0] == serde_json::json!([]) && c["result"] == empty));
+        assert!(cases.iter().filter(real).any(|c| c["result"][0] == tagged("Infinity")), "{cases:?}");
+        for name in ["NaN", "Infinity", "-Infinity"] {
+            assert!(cases.iter().filter(edge).any(|c| c["args"][1] == tagged(name)), "{name}: {cases:?}");
+            assert!(cases.iter().filter(edge).any(|c| c["args"][0][0] == tagged(name)), "{name}: {cases:?}");
+        }
+        assert!(
+            cases.iter().filter(edge).any(|c| c["args"][1].as_f64().is_some_and(|x| x == 0.0 && x.is_sign_negative()))
+        );
+        assert!(verified.total > 0 && verified.passed == verified.total, "{verified:?}");
+        assert!(caught.failed > 0 && caught.failures.iter().any(|f| f.expected.contains(r#"{"$float":"NaN"}"#)));
+        assert!(original.contains("empty 80, infinite 170"), "{original}");
+        assert_eq!(enabled, original);
+        assert_eq!(checked, "1 1 1 1 1 1 1\n");
+    }
+
+    #[test]
+    fn cpp_json_carries_nan_and_infinity_tagged() {
+        let Some(cc) =
+            ["c++", "g++", "clang++"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())
+        else {
+            eprintln!("no C++ compiler on PATH, skipping");
+            return;
+        };
+        let main = r#"int main() {
+    const double inf = INFINITY;
+    std::string o = "[";
+    t::enc_all(o, std::vector<double>{NAN, -0.5, -inf}, std::map<std::string, float>{{"k", (float) inf}},
+               std::pair<double, long>{-0.0, 1}, std::array<double, 2>{{inf, 2.5}});
+    std::printf("%s]\n", o.c_str());
+    const char *p = "[[1.5,{\"$float\":\"NaN\"},{\"$float\":\"Infinity\"},{\"$float\":\"-Infinity\"},-0.0],"
+                    "{\"k\":{\"$float\":\"-Infinity\"}},[{\"$float\":\"NaN\"},2],{\"$float\":\"nan\"}]";
+    t::V v = t::parse(p);
+    std::vector<double> xs;
+    std::map<std::string, float> m;
+    std::pair<double, double> pair;
+    double lookalike = 1;
+    t::from(v.arr[0], xs);
+    t::from(v.arr[1], m);
+    t::from(v.arr[2], pair);
+    t::from(v.arr[3], lookalike);
+    std::printf("%g %d %g %g %d | %g | %d %g | %g\n", xs[0], (int) std::isnan(xs[1]), xs[2], xs[3], (int) std::signbit(xs[4]),
+                (double) m["k"], (int) std::isnan(pair.first), pair.second, lookalike);
+    return 0;
+}
+"#;
+        let includes = ["algorithm", "array", "cmath", "cstdio", "cstdlib", "cstring", "limits", "map", "string"]
+            .iter()
+            .chain(&["type_traits", "unordered_map", "utility", "vector"])
+            .map(|h| format!("#include <{h}>\n"))
+            .collect::<String>();
+        let dir = std::env::temp_dir().join(format!("fa-cpp-json-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("t.cpp"), format!("{includes}namespace t {{\n{JSON_HPP}}}\n{main}")).unwrap();
+        let built = Command::new(cc)
+            .args(["-std=c++17", "-Wall", "-Wextra", "-Werror", "t.cpp", "-o", "t"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let ran = built.status.success().then(|| Command::new(dir.join("t")).output().unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&ran.unwrap().stdout),
+            "[[{\"$float\":\"NaN\"},-0.5,{\"$float\":\"-Infinity\"}],{\"k\":{\"$float\":\"Infinity\"}},[-0.0,1],[{\"$float\":\"Infinity\"},2.5]]\n\
+             1.5 1 inf -inf 1 | -inf | 1 2 | 0\n"
+        );
     }
 
     #[cfg(unix)]
@@ -2214,7 +2366,7 @@ mod tests {
                 (*id, v.passed, v.total)
             })
             .collect();
-        let check = "#include <math.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\nint fa_on_M(void);\nint fa_on_H(void);\nint fa_on_C(void);\nint fa_on_L(void);\nlong long fa_fast_M(int *, signed char a, unsigned short b, int c, unsigned int d, long e, const char *s, const long *xs, size_t n);\nunsigned long long fa_fast_H(int *, const unsigned char *bs, int n, unsigned long long seed);\ndouble fa_fast_C(int *, float g, const int *ys, unsigned n, double k);\nbool fa_fast_L(int *, const char *s, short k, bool flip);\nint main(void) {\n    long xs[3] = {5, -6, 7};\n    int ys[2] = {3, -4};\n    unsigned char bs[4] = {1, 200, 3, 255};\n    int ok[7];\n    int on = fa_on_M() + fa_on_H() + fa_on_C() + fa_on_L();\n    long long r1 = fa_fast_M(&ok[0], -5, 65000, -70000, 4000000000u, -900000L, \"h\\xc3\\xa9llo \\xe6\\x97\\xa5\", xs, 3);\n    unsigned long long r2 = fa_fast_H(&ok[1], bs, 4, 18446744073709551557ULL);\n    double r3 = fa_fast_C(&ok[2], 1.5f, ys, 2, 0.25);\n    bool r4 = fa_fast_L(&ok[3], \"\\xc3\\xa9\\xc3\\xa9\", 3, true);\n    bool r5 = fa_fast_L(&ok[4], \"ab\", 1, false);\n    /* the C version answers these: NaN and NULL never reach the port */\n    fa_fast_C(&ok[5], NAN, ys, 2, 0.25);\n    fa_fast_L(&ok[6], NULL, 1, false);\n    printf(\"%d %lld %llu %.17g %d %d\", on, r1, r2, r3, (int) r4, (int) r5);\n    for (int i = 0; i < 7; i++) printf(\" %d\", ok[i]);\n    printf(\"\\n\");\n    return 0;\n}\n";
+        let check = "#include <math.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\nint fa_on_M(void);\nint fa_on_H(void);\nint fa_on_C(void);\nint fa_on_L(void);\nlong long fa_fast_M(int *, signed char a, unsigned short b, int c, unsigned int d, long e, const char *s, const long *xs, size_t n);\nunsigned long long fa_fast_H(int *, const unsigned char *bs, int n, unsigned long long seed);\ndouble fa_fast_C(int *, float g, const int *ys, unsigned n, double k);\nbool fa_fast_L(int *, const char *s, short k, bool flip);\nint main(void) {\n    long xs[3] = {5, -6, 7};\n    int ys[2] = {3, -4};\n    unsigned char bs[4] = {1, 200, 3, 255};\n    int ok[7];\n    int on = fa_on_M() + fa_on_H() + fa_on_C() + fa_on_L();\n    long long r1 = fa_fast_M(&ok[0], -5, 65000, -70000, 4000000000u, -900000L, \"h\\xc3\\xa9llo \\xe6\\x97\\xa5\", xs, 3);\n    unsigned long long r2 = fa_fast_H(&ok[1], bs, 4, 18446744073709551557ULL);\n    double r3 = fa_fast_C(&ok[2], 1.5f, ys, 2, 0.25);\n    bool r4 = fa_fast_L(&ok[3], \"\\xc3\\xa9\\xc3\\xa9\", 3, true);\n    bool r5 = fa_fast_L(&ok[4], \"ab\", 1, false);\n    /* NaN reaches the port; NULL never does, the C version answers that */\n    double r6 = fa_fast_C(&ok[5], NAN, ys, 2, 0.25);\n    fa_fast_L(&ok[6], NULL, 1, false);\n    printf(\"%d %lld %llu %.17g %d %d\", on, r1, r2, r3, (int) r4, (int) r5);\n    for (int i = 0; i < 7; i++) printf(\" %d\", ok[i]);\n    printf(\" %d\\n\", isnan(r6) != 0);\n    return 0;\n}\n";
         let check = [("_M(", "lib.mix"), ("_H(", "lib.hash"), ("_C(", "lib.scale"), ("_L(", "lib.longer")]
             .iter()
             .fold(check.to_string(), |c, (from, id)| c.replace(from, &format!("_{}(", util::slug(id))));
@@ -2230,7 +2382,7 @@ mod tests {
         let r1 = -5i64 + 65000 - 70000 + 4000000000 - 900000 + "h\u{e9}llo \u{65e5}".len() as i64 + 5 - 6 * 2 + 7 * 3;
         let r2 =
             [1u8, 200, 3, 255].iter().fold(18446744073709551557u64, |h, &b| h.wrapping_mul(1099511628211) ^ b as u64);
-        assert_eq!(checked, format!("4 {r1} {r2} 1.25 0 1 1 1 1 1 1 0 0\n"));
+        assert_eq!(checked, format!("4 {r1} {r2} 1.25 0 1 1 1 1 1 1 1 0 1\n"));
     }
 
     #[cfg(unix)]
@@ -2252,10 +2404,18 @@ mod tests {
         assert!(m.rust_ns > 0.0 && m.rust_ns < 3.0 * m.original_ns, "{m:?}");
     }
 
-    /// The typed glue generated into every C port, compiled here as it is there.
+    /// The typed glue generated into every C port, compiled here as it is there: next to the
+    /// JSON entry point's wire code.
     #[allow(dead_code)]
     mod typed_glue {
-        include!("cfamily/typed.rs");
+        const FLOATS: [&str; 4] = crate::native::FLOATS;
+        include!("native/wire.rs");
+        mod typed {
+            include!("cfamily/typed.rs");
+        }
+        use serde::de::IntoDeserializer;
+        use serde_json::json;
+        use typed::*;
 
         #[test]
         fn c_values_convert_like_json_and_results_take_one_number_or_bool() {
@@ -2283,7 +2443,25 @@ mod tests {
             assert!(typed_ret::<f64, _>(&"text").is_err() && typed_ret::<f64, _>(&None::<f64>).is_err());
             assert!(typed_ret::<i64, _>(&vec![1]).is_err());
             assert_eq!(1i32.json(), json!(true));
-            assert_eq!(f64::NAN.json(), Value::Null);
+            assert_eq!(f64::NAN.json(), json!({"$float": "NaN"}));
+        }
+
+        #[test]
+        fn verify_reads_and_writes_nan_and_infinity_tagged() {
+            let tag = |name: &str| json!({ "$float": name });
+            assert!(typed_f64(&tag("NaN")).unwrap().is_nan());
+            assert_eq!(typed_f64(&tag("-Infinity")), Some(f64::NEG_INFINITY));
+            assert_eq!(typed_f32(&tag("Infinity")), Some(f32::INFINITY));
+            assert_eq!(typed_f64(&json!(-0.0)).map(f64::is_sign_negative), Some(true));
+            assert_eq!(typed_f64(&tag("nan")), None);
+            assert_eq!(typed_f64(&json!({"$float": "NaN", "x": 1})), None);
+            let xs = typed_vec(&json!([1.5, tag("Infinity"), 2]), typed_f64).unwrap();
+            assert_eq!(xs, [1.5, f64::INFINITY, 2.0]);
+            let args = [json!(1), tag("NaN")];
+            assert!(typed_json(&args, 1, typed_f64).unwrap().is_nan());
+            assert_eq!(f64::INFINITY.json(), tag("Infinity"));
+            assert_eq!(f64::NEG_INFINITY.json(), tag("-Infinity"));
+            assert!((-0.0f64).json().as_f64().is_some_and(f64::is_sign_negative));
         }
     }
 }
