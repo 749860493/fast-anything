@@ -184,8 +184,7 @@ pub fn verify(root: &Path, id: Option<&str>) -> Result<(String, Verify)> {
             ));
             let visible = util::count_lines(&ctx.crate_dir(&port).join("recordings.jsonl"));
             let mut v = port.lang.verify(&ctx, &port)?;
-            v.held_out = ctx.held_out(&port);
-            backend::redact_held_out(&mut v, &port.func, visible);
+            backend::finish_replay(&ctx, &port, visible, &mut v)?;
             v
         }
     };

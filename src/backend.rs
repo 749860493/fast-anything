@@ -367,11 +367,27 @@ pub fn replay(ctx: &Ctx, port: &Port) -> Result<Replay> {
         text.push('\n');
     }
     text.push_str(&fs::read_to_string(ctx.holdout(port)).context("reading the held-out calls")?);
-    let verify_dir = ctx.fast.join("verify").join(dir.file_name().unwrap_or_default());
+    let verify_dir = verify_dir(ctx, port);
     fs::create_dir_all(&verify_dir)?;
     let cases = verify_dir.join("cases.jsonl");
     fs::write(&cases, text)?;
     Ok(Replay { cases, out: verify_dir.join("verify.json"), held_out })
+}
+
+fn verify_dir(ctx: &Ctx, port: &Port) -> PathBuf {
+    ctx.fast.join("verify").join(ctx.crate_dir(port).file_name().unwrap_or_default())
+}
+
+/// After the runner reports: count and redact the held-out calls, then remove .fast/verify/<port>/,
+/// whose cases and report show their values. Without held-out calls verify.json stays in the crate.
+pub fn finish_replay(ctx: &Ctx, port: &Port, visible: usize, v: &mut Verify) -> Result<()> {
+    v.held_out = ctx.held_out(port);
+    redact_held_out(v, &port.func, visible);
+    let dir = verify_dir(ctx, port);
+    if v.held_out > 0 && dir.exists() {
+        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Failures among the held-out calls (replayed right after the `visible` lines of recordings.jsonl)
@@ -672,6 +688,67 @@ mod tests {
         let merged: Vec<String> = fs::read_to_string(&r.cases).unwrap().lines().map(str::to_string).collect();
         let want: Vec<String> = replay_order(12).into_iter().map(call).collect();
         assert_eq!(merged, want, "visible calls first, then the held-out ones at 10 and 11");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn verify_leaves_no_held_out_values_behind() {
+        let root = std::env::temp_dir().join(format!("fa-holdout-finish-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let ctx = Ctx::open(&root).unwrap();
+        let mut port = Port {
+            id: "app.f".into(),
+            file: "app.py".into(),
+            module: "app".into(),
+            func: "f".into(),
+            ext: "fa_app_f".into(),
+            crate_dir: ".fast/ports/app.f".into(),
+            recorded: 4,
+            calls_seen: 4,
+            verify: None,
+            enabled: false,
+            lang: Lang::Python,
+            owner: None,
+            line: 1,
+            sources: vec![],
+        };
+        let dir = ctx.crate_dir(&port);
+        fs::create_dir_all(&dir).unwrap();
+        let recordings = dir.join("recordings.jsonl");
+        let failed = |case: usize| Verify {
+            built: true,
+            total: 12,
+            failed: 1,
+            passed: 11,
+            failures: vec![crate::state::Failure {
+                case,
+                call: "f(4007)".into(),
+                expected: "4007".into(),
+                got: "0".into(),
+            }],
+            ..Verify::default()
+        };
+
+        // Without held-out calls the report stays in the crate folder.
+        fs::write(&recordings, (0..4).map(call).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let r = replay(&ctx, &port).unwrap();
+        fs::write(&r.out, "{}").unwrap();
+        let mut v = failed(2);
+        finish_replay(&ctx, &port, 4, &mut v).unwrap();
+        assert!(dir.join("verify.json").exists());
+        assert_eq!((v.held_out, v.failures[0].call.as_str()), (0, "f(4007)"));
+
+        port.recorded = 12;
+        fs::write(&recordings, (0..12).map(call).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        hold_out(&recordings, &ctx.holdout(&port)).unwrap();
+        let r = replay(&ctx, &port).unwrap();
+        fs::write(&r.out, "{\"failures\":[{\"call\":\"f(4007)\"}]}").unwrap();
+        let mut v = failed(10);
+        finish_replay(&ctx, &port, 10, &mut v).unwrap();
+        assert!(!r.cases.exists() && !r.out.exists() && !ctx.fast.join("verify/app.f").exists());
+        assert_eq!((v.total, v.passed, v.failed, v.held_out), (12, 11, 1, 2));
+        assert_eq!(v.failures[0].call, "(held out) f(…)");
         let _ = fs::remove_dir_all(&root);
     }
 
