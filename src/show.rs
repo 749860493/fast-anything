@@ -419,7 +419,7 @@ mod tests {
             built: true,
             total: 10,
             passed: 10,
-            micro: Some(Micro { original_ns: 100.0, rust_ns: 10.0, speedup: 10.0 }),
+            micro: Some(Micro { original_ns: 100.0, rust_ns: 10.0, speedup: 10.0, clock_ns: 0.0 }),
             lang: Lang::Python,
             ..Verify::default()
         };
