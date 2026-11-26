@@ -2097,6 +2097,11 @@ mod tests {
         );
     }
 
+    /// How the tests build C: without fusing `a * b + c` into one FMA instruction, which clang does
+    /// by default on ARM (macOS) and which rounds differently from the ports written here.
+    #[cfg(unix)]
+    const C_FLAGS: [&str; 2] = ["-O2", "-ffp-contract=off"];
+
     /// A C project in a temp folder: scanned, each (id, port.rs) ported and built, then all enabled.
     /// None without a C compiler or cargo.
     #[cfg(unix)]
@@ -2109,7 +2114,7 @@ mod tests {
         for (name, text) in files {
             fs::write(dir.join(name), text).unwrap();
         }
-        let command = [cc, "-O2"].into_iter().chain(files.iter().map(|f| f.0)).map(String::from).collect();
+        let command = [cc].into_iter().chain(C_FLAGS).chain(files.iter().map(|f| f.0)).map(String::from).collect();
         crate::pipeline::scan(&dir, command, None).unwrap();
         for (id, port_rs) in ports {
             let out = crate::pipeline::port(&dir, Some(id), 200).unwrap();
@@ -2127,7 +2132,7 @@ mod tests {
     /// Builds the sources in dir and runs them; FAST_ANYTHING_DISABLE=1 with `disable`.
     #[cfg(unix)]
     fn run_c(dir: &Path, cc: &str, sources: &[&str], disable: bool) -> String {
-        let built = Command::new(cc).arg("-O2").args(sources).args(["-o", "app"]).current_dir(dir).output().unwrap();
+        let built = Command::new(cc).args(C_FLAGS).args(sources).args(["-o", "app"]).current_dir(dir).output().unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
         let mut cmd = Command::new(dir.join("app"));
         if disable {
