@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.9
+
+- `--json` for machine-readable output (#145).
+- Java and Kotlin: NaN and infinity pass between the app and the port (#162); C and C++ too (#150).
+- `bench`: waits for the app when reading its output fails (#148); the report says when and where it ran, with the scan that chose the ports (#149).
+- `verify`: refuses to enable a port too cheap to time per call (#151) and deletes the working copy of held-out calls (#147).
+- Python: typed PyO3 defaults and string-literal unescaping (#156), shadowed stdlib names (#155), package re-exports (#154). Node: shadowed IO names and pure crypto/fs (#153), ES module syntax without `"type"` (#152).
+- Tests build C without FMA contraction (#160) and enable the port before `bench` on Windows (#157); TASK.md notes an empty f64 sum is -0.0 (#146).
+
+Thanks @Plastic-time, @Butterski, @mohitmishra786, @brixtonpham and @JuggyBob.
+
 ## 0.8.8
 
 - `bench`: rounds with an A/A control (the original against itself), a faster/slower/noise verdict, and CPU time next to wall time (#138).
