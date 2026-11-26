@@ -7,9 +7,14 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SKIP_DIRS = new Set([".fast", ".git", "node_modules"]);
-const IO =
-  /\b(console|fs|process|fetch|require|XMLHttpRequest|document|window|localStorage|sessionStorage|setTimeout|setInterval|setImmediate|queueMicrotask|Bun|Deno)\b|\bimport\s*\(/g;
-const NONDET = /\bMath\.random\b|\bDate\.now\b|\bnew\s+Date\b|\bperformance\.now\b|\bcrypto\.\w+/g;
+const IO_GLOBALS = [
+  "console", "fs", "process", "fetch", "require", "XMLHttpRequest", "document", "window",
+  "localStorage", "sessionStorage", "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Bun", "Deno",
+];
+const IO_GLOBAL_RE = new RegExp(`(?<![\\w$])(${IO_GLOBALS.join("|")})(?![\\w$])(\\s*\\??\\.\\s*([\\w$]+))?`, "g");
+const DYNAMIC_IMPORT_RE = /(?<![\w$])import\s*\(/g;
+const NONDET_RE =
+  /(?<![\w$])(?:(Math)\s*\??\.\s*random|(Date)\s*\??\.\s*now|new\s+(Date)|(performance)\s*\??\.\s*now|(crypto)\s*\??\.\s*([\w$]+))(?![\w$])/g;
 const IDENT = "[A-Za-z_$][\\w$]*";
 // Built-in modules whose functions do I/O (or read the machine and the process) wherever they're reached
 // from, and the members that don't: constants and pure helpers like `net.isIP`.
@@ -479,7 +484,8 @@ function shadowedIn(body, name) {
   const ranges = [];
   const n = esc(name);
   for (const d of body.matchAll(/\b(let|const|var)\s+/g)) {
-    if (/\bas$/.test(tail(body, d.index, 20))) continue; // `as const`
+    const beforeDecl = tail(body, d.index, 20);
+    if (/\bas$/.test(beforeDecl) || isPropAccess(beforeDecl)) continue; // `as const` or `obj.const`
     const start = d.index + d[0].length;
     const end = declarationEnd(body, start);
     if (!topParts(body.slice(start, end)).flatMap(bindingNames).includes(name)) continue;
@@ -637,31 +643,103 @@ function importsOf(src, code) {
   return out;
 }
 
+/** Whether `before` ends with a member-access `.` (or `?.`), excluding the spread/rest `...` operator. */
+function isPropAccess(before) {
+  return before.endsWith(".") && !before.endsWith("...");
+}
+
+/** Whether `before` ends with a free `globalThis.` / `global.` (or `?.`) member access, not `x.globalThis.`. */
+function isGlobalThisProp(before) {
+  const m = before.match(/(?:^|[^\w$])(?:globalThis|global)\s*\??\.$/);
+  if (!m) return false;
+  const headStart = m.index + (/^[^\w$]/.test(m[0]) ? 1 : 0);
+  const pre = before.slice(0, headStart).trimEnd();
+  return !isPropAccess(pre);
+}
+
+/** Classify an identifier occurrence at `index` in `body`:
+ *  - "explicitGlobal": accessed through `globalThis.<name>` / `global.<name>` (including `?.`),
+ *    which bypasses local shadowing and imports of `<name>`
+ *  - "nonGlobal": property access on another value, parameter, shadowed local, object/type key,
+ *    or method shorthand definition
+ *  - "global": a free reference in scope. */
+function useKind(body, index, name, paramNames, shadowCache) {
+  const before = tail(body, index);
+  const after = index + name.length;
+  const rest = body.slice(after, after + 300);
+  if (isPropAccess(before)) return isGlobalThisProp(before) ? "explicitGlobal" : "nonGlobal";
+  if (paramNames.has(name)) return "nonGlobal";
+  if (/[{,;(]$/.test(before) && /^\s*\??\s*:/.test(rest)) return "nonGlobal"; // a key or a typed name: `{ env: x }`, `(env: T) =>`
+  if (DEFINES.test(before) && /^\s*(?:<[^()]*>)?\s*\(/.test(rest)) {
+    const open = after + rest.indexOf("(");
+    const close = matching(body, open);
+    if (close >= 0 && /^\s*(?::[^{=;]*)?\{/.test(body.slice(close + 1, close + 300))) return "nonGlobal"; // a method
+  }
+  if (!shadowCache.has(name)) shadowCache.set(name, shadowedIn(body, name));
+  return shadowCache.get(name).some(([a, b]) => index >= a && index < b) ? "nonGlobal" : "global";
+}
+
+/** Direct uses of built-in globals (IO_GLOBALS, dynamic import(), Math.random, Date, performance.now,
+ *  and non-deterministic crypto.* members), ignoring parameters, shadowed locals, property accesses,
+ *  object keys, method definitions, and known-pure members like `fs.constants` and `crypto.createHash`. */
+function globalEffects(body, paramNames, imports, shadowCache) {
+  const io = new Set();
+  const nondet = new Set();
+  for (const m of body.matchAll(IO_GLOBAL_RE)) {
+    const name = m[1];
+    const prop = m[3] || null;
+    const kind = useKind(body, m.index, name, paramNames, shadowCache);
+    if (kind === "nonGlobal") continue;
+    if (prop && IO_PURE.has(name + "." + prop)) continue;
+    if (kind !== "explicitGlobal" && imports.has(name)) {
+      const imp = imports.get(name);
+      if (builtin(imp.mod, imp.member ?? prop) !== "io") continue;
+    }
+    io.add(name);
+  }
+  for (const m of body.matchAll(DYNAMIC_IMPORT_RE)) {
+    const before = tail(body, m.index);
+    if (isPropAccess(before)) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matching(body, open);
+    if (DEFINES.test(before) && close >= 0 && /^\s*(?::[^{=;]*)?\{/.test(body.slice(close + 1, close + 300))) continue;
+    io.add(m[0]);
+  }
+  for (const m of body.matchAll(NONDET_RE)) {
+    const base = m[1] || m[2] || m[3] || m[4] || m[5];
+    const baseIndex = m[3] ? m.index + m[0].lastIndexOf("Date") : m.index;
+    const kind = useKind(body, baseIndex, base, paramNames, shadowCache);
+    if (kind === "nonGlobal") continue;
+    if (kind !== "explicitGlobal" && imports.has(base)) {
+      const imp = imports.get(base);
+      const member = m[5] ? m[6] : m[1] ? "random" : (m[2] || m[4]) ? "now" : null;
+      if (builtin(imp.mod, imp.member ?? member) !== "nondet") continue;
+    }
+    if (m[5]) {
+      if (!NONDET_CRYPTO.test(m[6])) continue;
+      nondet.add("crypto." + m[6]);
+    } else if (m[3]) {
+      nondet.add("new Date");
+    } else {
+      nondet.add(m[0].replace(/\s*\??\.\s*/, "."));
+    }
+  }
+  return { io, nondet };
+}
+
 /** [what, label] for each use in `body` of an imported built-in that does I/O or isn't deterministic.
  *  A use where the name is the function's own (a parameter of it, or of a nested function, arrow or catch
  *  around the use, or declared in a block around it) doesn't count, nor does a property, an object key or a
- *  method's name. Names IO or NONDET already matched (`fs` imported as fs, `performance.now`) aren't
+ *  method's name. Names globalEffects already matched (`fs` imported as fs, `performance.now`) aren't
  *  reported twice. */
-function importedCalls(imports, body, params, seen) {
+function importedCalls(imports, body, paramNames, seen, shadowCache) {
   const out = [];
   for (const [local, { mod, member }] of imports) {
     if ([...seen].some((t) => t === local || t.startsWith(local + "."))) continue;
-    if (topParts(params).flatMap(bindingNames).includes(local)) continue;
-    let hidden = null;
+    if (paramNames.has(local)) continue;
     const base = mod.replace(/^node:/, "").split("/")[0];
-    for (const use of body.matchAll(new RegExp("(?<![\\w$.])" + esc(local) + "(?![\\w$])(\\s*\\??\\.\\s*([\\w$]+))?", "g"))) {
-      const before = tail(body, use.index);
-      const after = use.index + local.length;
-      const rest = body.slice(after, after + 300);
-      if (before.endsWith(".")) continue; // a property on the line above: `re\n  .exec(s)`
-      if (/[{,;(]$/.test(before) && /^\s*\??\s*:/.test(rest)) continue; // a key or a typed name: `{ env: x }`, `(env: T) =>`
-      if (DEFINES.test(before) && /^\s*(?:<[^()]*>)?\s*\(/.test(rest)) {
-        const open = after + rest.indexOf("(");
-        const close = matching(body, open);
-        if (close >= 0 && /^\s*(?::[^{=;]*)?\{/.test(body.slice(close + 1, close + 300))) continue; // a method
-      }
-      hidden ??= shadowedIn(body, local);
-      if (hidden.some(([a, b]) => use.index >= a && use.index < b)) continue;
+    for (const use of body.matchAll(new RegExp("(?<![\\w$])" + esc(local) + "(?![\\w$])(\\s*\\??\\.\\s*([\\w$]+))?", "g"))) {
+      if (useKind(body, use.index, local, paramNames, shadowCache) !== "global") continue;
       const at = member ?? use[2] ?? null;
       const what = builtin(mod, at);
       if (what) out.push([what, at ? base + "." + at : base]);
@@ -759,9 +837,10 @@ function describe(file, line0, name, entry, root) {
   if (bodyEnd < 0) return null;
   const body = code.slice(bodyStart, bodyEnd + 1);
 
-  const io = new Set([...body.matchAll(IO)].map((x) => x[0]));
-  const nondet = new Set([...body.matchAll(NONDET)].map((x) => x[0]));
-  for (const [what, label] of importedCalls(imports, body, code.slice(open + 1, close), new Set([...io, ...nondet]))) (what === "io" ? io : nondet).add(label);
+  const paramNames = new Set(topParts(code.slice(open + 1, close)).flatMap(bindingNames));
+  const shadowCache = new Map();
+  const { io, nondet } = globalEffects(body, paramNames, imports, shadowCache);
+  for (const [what, label] of importedCalls(imports, body, paramNames, new Set([...io, ...nondet]), shadowCache)) (what === "io" ? io : nondet).add(label);
   if (/\byield\b/.test(body) && !blockers.some((b) => b.startsWith("generator"))) blockers.push("generator (yield)");
   if (/\bawait\b/.test(body) && !blockers.includes("async")) blockers.push("async");
   if (/\bthis\b/.test(body)) blockers.push("uses this");
