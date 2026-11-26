@@ -138,7 +138,9 @@ pub fn verify(id: &str, v: &Verify) {
         } else {
             ui::ok(format!("{}/{} recorded calls give the same result", v.passed, v.total));
         }
-        if let Some(m) = v.micro {
+        if v.too_cheap() {
+            ui::warn(crate::pipeline::too_cheap_hint(&bold(id), v));
+        } else if let Some(m) = v.micro {
             ui::ok(format!(
                 "{} per call: {} in {}, {} in Rust: {}",
                 bold(id),

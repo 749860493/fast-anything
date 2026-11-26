@@ -156,6 +156,12 @@ impl Verify {
     pub fn slower(&self) -> bool {
         self.micro.is_some_and(|m| m.speedup > 0.0 && m.speedup < 1.0)
     }
+
+    /// The original's own work per call is under one clock read, so per-call times are mostly the
+    /// clock and can't show Rust saving anything (only where clock_ns was measured).
+    pub fn too_cheap(&self) -> bool {
+        self.micro.is_some_and(|m| m.clock_ns > 0.0 && m.original_ns < 2.0 * m.clock_ns)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -175,6 +181,9 @@ pub struct Micro {
     pub original_ns: f64,
     pub rust_ns: f64,
     pub speedup: f64,
+    /// What one clock read costs, where the original was timed with a read before and after each
+    /// call (C-bridge languages); 0 where whole passes were timed.
+    pub clock_ns: f64,
 }
 
 pub struct Ctx {
@@ -273,12 +282,31 @@ mod tests {
 
     #[test]
     fn slower_only_when_measured_below_one() {
-        let v =
-            |speedup| Verify { micro: Some(Micro { original_ns: 1.0, rust_ns: 1.0, speedup }), ..Verify::default() };
+        let v = |speedup| Verify {
+            micro: Some(Micro { original_ns: 1.0, rust_ns: 1.0, speedup, clock_ns: 0.0 }),
+            ..Verify::default()
+        };
         assert!(v(0.5).slower());
         assert!(!v(1.4).slower());
         assert!(!v(0.0).slower(), "no measurement isn't slower");
         assert!(!Verify::default().slower());
+    }
+
+    #[test]
+    fn too_cheap_only_under_two_clock_reads() {
+        let v = |original_ns, clock_ns| Verify {
+            micro: Some(Micro { original_ns, rust_ns: original_ns, speedup: 1.0, clock_ns }),
+            ..Verify::default()
+        };
+        assert!(v(25.0, 22.0).too_cheap() && !v(25.0, 22.0).slower(), "1.0x, but mostly the clock");
+        assert!(v(43.9, 22.0).too_cheap());
+        assert!(!v(44.0, 22.0).too_cheap(), "work of one clock read on top of the read itself");
+        assert!(!v(1800.0, 22.0).too_cheap());
+        assert!(!v(25.0, 0.0).too_cheap(), "whole passes timed: no clock to compare");
+        assert!(!Verify::default().too_cheap());
+        let old: Micro = serde_json::from_str(r#"{"original_ns": 25.0, "rust_ns": 24.0, "speedup": 1.04}"#).unwrap();
+        assert_eq!(old.clock_ns, 0.0);
+        assert!(!Verify { micro: Some(old), ..Verify::default() }.too_cheap(), "state from before clock_ns");
     }
 
     #[test]

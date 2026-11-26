@@ -234,6 +234,18 @@ pub fn slower_hint() -> &'static str {
     "calling into Rust costs more than this function's work, so it won't be switched on. Port its caller instead (fewer, bigger calls), or  enable --force"
 }
 
+/// Why a port too cheap to time (see Verify::too_cheap) isn't switched on.
+pub fn too_cheap_hint(id: &str, v: &Verify) -> String {
+    let m = v.micro.unwrap_or_default();
+    format!(
+        "{id} takes about as long as reading the clock ({} per call in {}, the clock {}), so verify can't tell whether Rust saves anything: {}",
+        util::nanos(m.original_ns),
+        v.lang.label(),
+        util::nanos(m.clock_ns),
+        slower_hint()
+    )
+}
+
 /// Whether the crate is not exactly the one covered by the last verify. Old state without a hash
 /// keeps its legacy behavior; re-porting clears verify and therefore always needs a new one.
 fn crate_needs_verify(ctx: &Ctx, port: &Port) -> Result<bool> {
@@ -255,6 +267,10 @@ pub fn enable(root: &Path, id: Option<&str>, force: bool) -> Result<String> {
     }
     if !force && crate_needs_verify(&ctx, &port)? {
         bail!("{id}'s Rust changed since it passed verify: run  fast-anything verify {id}  (or --force)");
+    }
+    // too cheap to time comes first: a few-ns function measures 1.0x either way, so "slower" is noise
+    if let Some(v) = port.verify.as_ref().filter(|v| v.too_cheap() && !force) {
+        bail!("{}", too_cheap_hint(&id, v));
     }
     if let Some(m) = port.verify.as_ref().filter(|v| v.slower() && !force).and_then(|v| v.micro) {
         bail!("{id} is {} slower per call in Rust: {}", util::times(1.0 / m.speedup), slower_hint());
@@ -420,7 +436,7 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
     let attempts = attempts.max(1);
     let mut last: Option<Verify> = None;
     // A port that's right but slower goes back to the agent to speed up; if no later attempt is both
-    // right and faster, its sources are put back.
+    // right and faster, its sources are put back. One too cheap to time can't be shown faster.
     let mut right: Option<(Verify, Snapshot)> = None;
     for attempt in 1..=attempts {
         let ctx = Ctx::open(root)?;
@@ -434,7 +450,7 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
         agent::run(agent_spec, &dir, &prompt, &dir.join("agent.log"))?;
         let (_, v) = verify(root, Some(id))?;
         show::verify(id, &v);
-        if v.ok() && !v.slower() {
+        if v.ok() && (!v.slower() || v.too_cheap()) {
             return Ok(v);
         }
         if v.ok() && right.as_ref().is_none_or(|(best, _)| speedup(&v) > speedup(best)) {
@@ -552,7 +568,9 @@ pub fn go(
     for id in &picks {
         show::port(&port(root, Some(id), samples)?, false);
         let v = agent_port(root, id, agent_spec, attempts)?;
-        if v.ok() && v.slower() {
+        if v.ok() && v.too_cheap() {
+            ui::warn(too_cheap_hint(id, &v));
+        } else if v.ok() && v.slower() {
             ui::warn(format!("{id}: right, but slower in Rust per call; {}", slower_hint()));
         } else if v.ok() {
             enable(root, Some(id), false)?;
@@ -581,7 +599,7 @@ mod tests {
             built: true,
             total: 10,
             passed: 10,
-            micro: Some(Micro { original_ns: 1000.0, rust_ns: 4000.0, speedup: 0.25 }),
+            micro: Some(Micro { original_ns: 1000.0, rust_ns: 4000.0, speedup: 0.25, clock_ns: 20.0 }),
             ..Verify::default()
         };
         let text = feedback(&v);
