@@ -1913,4 +1913,133 @@ sys.exit(1 if fails else 0)
         );
         assert!(!marker.exists(), "queued task must not execute after terminate");
     }
+
+    #[test]
+    fn package_reexports_are_recorded() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let base = tmp.join(format!("fa-py-reexport-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+
+        // 1. Package __init__.py re-exports function directly and under an alias; nested subpackage re-exports too.
+        let d1 = base.join("pkg-func");
+        fs::create_dir_all(d1.join("mypkg/sub")).unwrap();
+        fs::write(d1.join("mypkg/__init__.py"), "from .sub import crunch, crunch as compute\n").unwrap();
+        fs::write(d1.join("mypkg/sub/__init__.py"), "from .core import crunch\n").unwrap();
+        fs::write(
+            d1.join("mypkg/sub/core.py"),
+            "def crunch(n: int) -> int:\n    return sum((i * i) % 97 for i in range(n))\n",
+        )
+        .unwrap();
+        fs::write(
+            d1.join("app.py"),
+            "import mypkg\nfrom mypkg import crunch\n\
+             if __name__ == '__main__':\n\
+             \x20   print(sum(crunch(100) + mypkg.compute(100) for _ in range(15)))\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&d1, vec![python.into(), "app.py".into()], None).unwrap();
+        let h = scanned
+            .hotspots
+            .iter()
+            .find(|h| h.id == "mypkg.sub.core.crunch")
+            .unwrap_or_else(|| panic!("missing mypkg.sub.core.crunch; got {:?}", scanned.hotspots));
+        assert!(h.portable(), "crunch should be portable, got {:?}", h.blockers);
+        let ported = crate::pipeline::port(&d1, Some("mypkg.sub.core.crunch"), 100).unwrap();
+        assert_eq!(ported.calls_seen, 30, "both direct and aliased re-exports must be recorded");
+        assert_eq!(ported.recorded, 30);
+
+        // 2. Package __init__.py re-exports a @staticmethod and @classmethod as top-level callables.
+        // 2. Re-exported @staticmethod, @classmethod, subclass @classmethod, plus unloaded LazyLoader
+        //    and hostile ModuleType subclasses in sys.modules must not crash or trigger lazy imports.
+        let d2 = base.join("pkg-methods");
+        fs::create_dir_all(d2.join("textpkg")).unwrap();
+        fs::write(
+            d2.join("textpkg/__init__.py"),
+            "import importlib.util, sys, types\n\
+             from .ops import Ops, SubOps\n\
+             score_s = Ops.score_s\n\
+             score_c = Ops.score_c\n\
+             sub_c = SubOps.score_c\n\n\
+             # Unloaded lazy module whose execution would fail if touched during Recorder.install.\n\
+             _lazy_spec = importlib.util.spec_from_loader(\n\
+             \x20   'textpkg._never_load',\n\
+             \x20   importlib.util.LazyLoader(\n\
+             \x20       type('_Loader', (), {\n\
+             \x20           'create_module': staticmethod(lambda spec: None),\n\
+             \x20           'exec_module': staticmethod(lambda mod: (_ for _ in ()).throw(RuntimeError('lazy loaded'))),\n\
+             \x20       })()\n\
+             \x20   ),\n\
+             )\n\
+             _lazy_mod = importlib.util.module_from_spec(_lazy_spec)\n\
+             _lazy_spec.loader.exec_module(_lazy_mod)\n\
+             sys.modules['textpkg._never_load'] = _lazy_mod\n\n\
+             # ModuleType subclass with raising __dict__ property and another with raising __setattr__.\n\
+             class _BadDict(types.ModuleType):\n\
+             \x20   @property\n\
+             \x20   def __dict__(self):\n\
+             \x20       raise RuntimeError('dict boom')\n\
+             sys.modules['textpkg._bad_dict'] = _BadDict('textpkg._bad_dict')\n\n\
+             class _FrozenMod(types.ModuleType):\n\
+             \x20   def __setattr__(self, k, v):\n\
+             \x20       raise RuntimeError('frozen')\n\
+             _frozen = _FrozenMod('textpkg._frozen')\n\
+             types.ModuleType.__dict__['__dict__'].__get__(_frozen, types.ModuleType)['alias'] = Ops.score_s\n\
+             sys.modules['textpkg._frozen'] = _frozen\n",
+        )
+        .unwrap();
+        fs::write(
+            d2.join("textpkg/ops.py"),
+            "class Ops:\n\
+             \x20   @staticmethod\n\
+             \x20   def score_s(n: int) -> int:\n\
+             \x20       return sum((i * 3) % 97 for i in range(n))\n\n\
+             \x20   @classmethod\n\
+             \x20   def score_c(cls, n: int) -> int:\n\
+             \x20       return sum((i * 5) % 97 for i in range(n))\n\n\
+             class SubOps(Ops):\n\
+             \x20   pass\n",
+        )
+        .unwrap();
+        fs::write(
+            d2.join("app.py"),
+            "from textpkg import score_s, score_c, sub_c\n\
+             if __name__ == '__main__':\n\
+             \x20   print(sum(score_s(100) + score_c(100) + sub_c(100) for _ in range(10)))\n",
+        )
+        .unwrap();
+        crate::pipeline::scan(&d2, vec![python.into(), "app.py".into()], None).unwrap();
+        let p_s = crate::pipeline::port(&d2, Some("textpkg.ops.Ops.score_s"), 50).unwrap();
+        assert_eq!(p_s.calls_seen, 10, "re-exported staticmethod must be recorded");
+        let p_c = crate::pipeline::port(&d2, Some("textpkg.ops.Ops.score_c"), 50).unwrap();
+        assert_eq!(p_c.calls_seen, 20, "re-exported classmethod and subclass classmethod must both be recorded");
+
+        // 3. Multiprocessing spawned workers using a package re-export are also recorded.
+        let d3 = base.join("pkg-mp");
+        fs::create_dir_all(d3.join("w")).unwrap();
+        fs::write(d3.join("w/__init__.py"), "from .core import sq\n").unwrap();
+        fs::write(d3.join("w/core.py"), "def sq(x: int) -> int:\n    return x * x\n").unwrap();
+        fs::write(
+            d3.join("app.py"),
+            "from concurrent.futures import ProcessPoolExecutor\n\
+             from multiprocessing import get_context\n\
+             from w import sq\n\
+             if __name__ == '__main__':\n\
+             \x20   with ProcessPoolExecutor(2, mp_context=get_context('spawn')) as pool:\n\
+             \x20       print(sum(pool.map(sq, range(12))))\n",
+        )
+        .unwrap();
+        crate::pipeline::scan(&d3, vec![python.into(), "app.py".into()], None).unwrap();
+        let p_mp = crate::pipeline::port(&d3, Some("w.core.sq"), 50).unwrap();
+        assert_eq!(p_mp.calls_seen, 12, "re-exported function in spawned workers must be recorded");
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }
