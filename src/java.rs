@@ -777,8 +777,8 @@ mod tests {
         let ctx = Ctx::open(&dir).unwrap();
         let started = Instant::now();
         // the window starts with the JVM, and `java App.java` compiles the source inside it: that
-        // takes longer on Windows
-        let window = if cfg!(windows) { 8.0 } else { 3.0 };
+        // takes longer on Windows and on macOS runners
+        let window = if cfg!(target_os = "linux") { 3.0 } else { 8.0 };
         let p = profile(&ctx, "java", &["App.java".into()], Some(window));
         let took = started.elapsed().as_secs_f64();
         let _ = fs::remove_dir_all(&dir);
