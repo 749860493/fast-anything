@@ -237,6 +237,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, NaN and infinity, non-ASCII text, very long input. verify tests these too.\n\
 - Floats must match within 1e-9 of their size (or of the largest value in the same Array), and zeros keep their sign: -0.0 is not 0.0. Keep the same order of float operations.\n\
+- `.sum()` of an empty float iterator is -0.0 in Rust: start float sums with `fold(0.0, |a, x| a + x)`.\n\
 - Change the `serde_json::Value` parameter and return types to concrete ones: they're deserialized for you.\n\
 - Ruby strings index by character: use `.chars()` (or bytes only after checking `is_ascii()`).\n\
 - Ruby Integers don't overflow. `i64` is fine unless the recorded values are bigger. Keep Integer vs Float as Ruby has it.\n\

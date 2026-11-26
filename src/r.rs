@@ -532,6 +532,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty vectors, zero, negatives, NA, non-ASCII text, very long input. verify tests these too.\n\
 - Doubles must match within 1e-9 of their size (or of the largest value in the same vector), and zeros keep their sign: -0 is not 0. Keep the same order of float operations.\n\
+- `.sum()` of an empty float iterator is -0.0 in Rust: start float sums with `fold(0.0, |a, x| a + x)`.\n\
 - R strings index by character: use `.chars()` (or bytes only after checking `is_ascii()`). R indexes from 1.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases.\n\
 - Keep the function name.\n\n\

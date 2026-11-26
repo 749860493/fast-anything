@@ -211,6 +211,7 @@ def same_floats(np, a, b):
     if not np.array_equal(a[infinite], b[infinite]) or np.any((a == b) & (np.signbit(a) != np.signbit(b))):
         return False
     x, y = a[finite], b[finite]
+    # One scale for the whole array: a 2-D array isn't scaled per row, so it's looser than nested lists.
     scale = np.abs(a[np.isfinite(a)]).max(initial=0.0)
     with np.errstate(over="ignore"):
         return bool(np.all((x == y) | (np.abs(x - y) <= 1e-9 * np.maximum(np.maximum(np.abs(x), np.abs(y)), scale))))
