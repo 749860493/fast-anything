@@ -2157,12 +2157,19 @@ mod tests {
     /// verify's replay of a built port, in this process.
     #[cfg(unix)]
     fn replay(dir: &Path, id: &str) -> Verify {
+        replay_lib(dir, id, None)
+    }
+
+    /// The replay, loading the port from `lib` if given (a library loaded once stays mapped on macOS,
+    /// so a rebuilt port at the same path would be the old one).
+    #[cfg(unix)]
+    fn replay_lib(dir: &Path, id: &str, lib_path: Option<PathBuf>) -> Verify {
         let ctx = Ctx::open(dir).unwrap();
         let port = &ctx.state.ports[id];
         let crate_dir = ctx.crate_dir(port);
         let (_, lib) = port.lang.artifact(&port.ext);
         let job = serde_json::json!({
-            "lib": ctx.lib_dir().join(lib), "cases": crate_dir.join("recordings.jsonl"),
+            "lib": lib_path.unwrap_or_else(|| ctx.lib_dir().join(lib)), "cases": crate_dir.join("recordings.jsonl"),
             "meta": crate_dir.join("recordings.meta.json"), "func": port.func, "out": crate_dir.join("verify.json"),
         });
         fs::write(crate_dir.join("job-verify.json"), job.to_string()).unwrap();
@@ -2186,7 +2193,10 @@ mod tests {
         fs::write(ctx.crate_dir(port).join("src").join("port.rs"), port_rs).unwrap();
         let built = backend::build(&ctx, port).unwrap();
         assert!(built.is_ok(), "{id}: {built:?}");
-        replay(dir, id)
+        let (_, lib) = port.lang.artifact(&port.ext);
+        let fresh = ctx.lib_dir().join(format!("other-{}-{lib}", std::process::id()));
+        fs::copy(ctx.lib_dir().join(lib), &fresh).unwrap();
+        replay_lib(dir, id, Some(fresh))
     }
 
     /// {"$float": name}, how NaN and infinity are recorded.
@@ -2337,7 +2347,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
         assert_eq!(
-            String::from_utf8_lossy(&ran.unwrap().stdout),
+            String::from_utf8_lossy(&ran.unwrap().stdout).replace("\r\n", "\n"),
             "[[{\"$float\":\"NaN\"},-0.5,{\"$float\":\"-Infinity\"}],{\"k\":{\"$float\":\"Infinity\"}},[-0.0,1],[{\"$float\":\"Infinity\"},2.5]]\n\
              1.5 1 inf -inf 1 | -inf | 1 2 | 0\n"
         );

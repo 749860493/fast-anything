@@ -433,15 +433,16 @@ pub fn replay(job_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What one clock read costs here: the least of a thousand back-to-back reads. The recorders time
-/// each call of the original with a read before and after it, so about this much of original_ns
-/// is the clock.
+/// What one clock read costs here: the average of ten thousand back-to-back reads (a single read
+/// can come out as 0 on a coarse clock, as on macOS). The recorders time each call of the original
+/// with a read before and after it, so about this much of original_ns is the clock.
 fn clock_ns() -> f64 {
-    let read = || {
-        let t = Instant::now();
-        t.elapsed()
-    };
-    (0..1000).map(|_| read()).min().unwrap_or_default().as_secs_f64() * 1e9
+    const READS: u32 = 10_000;
+    let start = Instant::now();
+    for _ in 0..READS {
+        std::hint::black_box(Instant::now());
+    }
+    start.elapsed().as_secs_f64() * 1e9 / f64::from(READS)
 }
 
 /// Same value, give or take float rounding.
