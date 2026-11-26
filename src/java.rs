@@ -513,7 +513,7 @@ pub const FLAVOR: Flavor = Flavor {
         "`/` and `%` on integers truncate toward zero, as in Rust. `Math.round` rounds half up: `(x + 0.5).floor()`.",
         "Arrays and Lists arrive as JSON arrays, Maps as objects with String keys.",
     ],
-    floats: None,
+    floats: Some(native::FLOATS),
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {
@@ -671,6 +671,72 @@ mod tests {
         assert!(edges.iter().any(|c| c["args"][1][0] == json!(-1)), "special numbers in arrays");
         assert!(edges.iter().all(|c| c["result"].is_i64()), "every edge has the original's answer");
         assert!(edges.len() <= 100);
+    }
+
+    #[test]
+    fn nan_and_infinity_travel_tagged() {
+        use serde_json::json;
+        if !Command::new("java").arg("-version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no java on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-java-floats-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let rec = REC.replace("/*PACKAGE*/", "").replace("/*ID*/", "Check.scale").replace("/*JSON*/", JSON);
+        fs::write(dir.join("FastAnythingRec.java"), rec).unwrap();
+        // the recorder, then the JSON the bridge uses, both ways (the port isn't built here)
+        let check = r#"
+            public class Check {
+                static double[] scale(double[] xs, double k) {
+                    double[] out = new double[xs.length];
+                    for (int i = 0; i < xs.length; i++) out[i] = xs[i] * k;
+                    return out;
+                }
+                public static void main(String[] a) {
+                    FastAnythingRec.record(new Object[] {new double[] {1.5, Double.POSITIVE_INFINITY}, Double.NEGATIVE_INFINITY},
+                        args -> scale((double[]) args[0], (double) args[1]));
+                    FastAnythingRec.record(new Object[] {new double[] {0.0}, 2.0}, args -> scale((double[]) args[0], (double) args[1]));
+                    Object back = FastAnythingRec.Json.parse(
+                        "{\"a\":[1.5,{\"$float\":\"NaN\"},{\"$float\":\"Infinity\"},{\"$float\":\"-Infinity\"}],\"b\":{\"$float\":\"x\"},\"c\":{}}");
+                    System.out.println(FastAnythingRec.Json.enc(back));
+                    Object xs = FastAnythingRec.Json.convert(((java.util.Map<?, ?>) back).get("a"), double[].class);
+                    System.out.println(java.util.Arrays.toString((double[]) xs));
+                    System.out.println(FastAnythingRec.Json.enc(new Object[] {Float.NaN, -0.0, Float.NEGATIVE_INFINITY}));
+                }
+            }
+        "#;
+        fs::write(dir.join("Check.java"), check).unwrap();
+        let out = dir.join("rec.jsonl");
+        let run = Command::new("java")
+            .arg("Check.java")
+            .current_dir(&dir)
+            .env("FAST_ANYTHING_RECORD_OUT", &out)
+            .env("FAST_ANYTHING_RECORD_META", dir.join("meta.json"))
+            .output()
+            .unwrap();
+        let text = fs::read_to_string(&out).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "{stdout}{}", String::from_utf8_lossy(&run.stderr));
+        let calls: Vec<Value> = text.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect();
+        assert_eq!(
+            calls.iter().find(|c| c.get("derived").is_none()),
+            Some(&json!({"args": [[1.5, {"$float": "Infinity"}], {"$float": "-Infinity"}],
+                         "result": [{"$float": "-Infinity"}, {"$float": "-Infinity"}]})),
+            "{text}"
+        );
+        // and NaN and infinity are edge cases now that they can be passed
+        let edge = |want: &str| calls.iter().any(|c| c["derived"] == "edge" && c["args"][1] == json!({"$float": want}));
+        assert!(edge("NaN") && edge("Infinity") && edge("-Infinity"), "{text}");
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                r#"{"a":[1.5,{"$float":"NaN"},{"$float":"Infinity"},{"$float":"-Infinity"}],"b":{"$float":"x"},"c":{}}"#,
+                "[1.5, NaN, Infinity, -Infinity]",
+                r#"[{"$float":"NaN"},-0.0,{"$float":"-Infinity"}]"#,
+            ]
+        );
     }
 
     #[test]

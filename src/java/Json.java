@@ -15,8 +15,10 @@
             else if (v instanceof Boolean || v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) b.append(v);
             else if (v instanceof Double || v instanceof Float) {
                 double d = ((Number) v).doubleValue();
-                if (!Double.isFinite(d)) throw new Unsupported("NaN or Infinity");
-                b.append(v);
+                // JSON has no NaN or infinity: they travel tagged, as the port reads and writes them
+                if (Double.isNaN(d)) b.append("{\"$float\":\"NaN\"}");
+                else if (Double.isInfinite(d)) b.append(d > 0 ? "{\"$float\":\"Infinity\"}" : "{\"$float\":\"-Infinity\"}");
+                else b.append(v);
             } else if (v instanceof String s) str(s, b);
             else if (v.getClass().isArray()) {
                 b.append('[');
@@ -100,7 +102,7 @@
                     i[0]++; // :
                     m.put(k, value(s, i));
                     ws(s, i);
-                    if (s.charAt(i[0]++) == '}') return m;
+                    if (s.charAt(i[0]++) == '}') return untag(m);
                 }
             }
             if (c == '[') {
@@ -141,6 +143,19 @@
             String num = s.substring(start, i[0]);
             if (num.contains(".") || num.contains("e") || num.contains("E")) return Double.parseDouble(num);
             try { return Long.parseLong(num); } catch (NumberFormatException ex) { return Double.parseDouble(num); }
+        }
+
+        /** {"$float": "NaN"} and the like, the way the port sends NaN and infinity, as a Double. */
+        static Object untag(java.util.Map<String, Object> m) {
+            if (m.size() == 1 && m.get("$float") instanceof String f) {
+                switch (f) {
+                    case "NaN": return Double.NaN;
+                    case "Infinity": return Double.POSITIVE_INFINITY;
+                    case "-Infinity": return Double.NEGATIVE_INFINITY;
+                    default: break;
+                }
+            }
+            return m;
         }
 
         /** A parsed JSON value as the Java type t (from the original method's signature). */
