@@ -1305,6 +1305,30 @@ CASES = [
     ("direct uuid4 nondet", "import uuid\ndef f():\n    return uuid.uuid4()\n", "f", ["not deterministic: uuid.uuid4"]),
     ("direct urlopen io", "import urllib.request\ndef f(u):\n    return urllib.request.urlopen(u)\n", "f", ["does I/O: urllib.request.urlopen"]),
     ("aliased time as datetime nondet", "import time as datetime\ndef f():\n    return datetime.time()\n", "f", ["not deterministic: time.time"]),
+    ("param named time shadows module", "def f(time: str) -> list[str]:\n    return time.split(':')\n", "f", []),
+    ("param named time with import time", "import time\ndef f(time: str) -> list[str]:\n    return time.split(':')\n", "f", []),
+    ("param named os shadows module", "import os\ndef f(os: str) -> str:\n    return os.strip().lower()\n", "f", []),
+    ("param named uuid shadows module", "def f(uuid: str) -> str:\n    return uuid.replace('-', '')\n", "f", []),
+    ("comprehension var named time", "import time\ndef f(items):\n    return [time.strip() for time in items]\n", "f", []),
+    ("local var named os", "def f(s):\n    os = s.strip()\n    return os.lower()\n", "f", []),
+    ("param named open shadows builtin", "def f(open, x):\n    return open(x)\n", "f", []),
+    ("module def open shadows builtin", "def open(x):\n    return x + 1\ndef f(x):\n    return open(x)\n", "f", []),
+    ("import math as time is pure", "import math as time\ndef f(x):\n    return time.sqrt(x)\n", "f", []),
+    ("param named os shadows os.environ", "import os\ndef f(os):\n    return os.environ\n", "f", []),
+    ("param named time then local import time still blocks", "def f(time):\n    s = time.strip()\n    import time\n    return time.time() + len(s)\n", "f", ["not deterministic: time.time"]),
+    ("unbound os.listdir still blocks", "def f(p):\n    return os.listdir(p)\n", "f", ["does I/O: os.listdir"]),
+    ("unbound os.environ still blocks", "def f():\n    return os.environ['X']\n", "f", ["does I/O: os.environ"]),
+    ("aliased os.environ still blocks", "import os as _os\ndef f():\n    return _os.environ['X']\n", "f", ["does I/O: os.environ"]),
+    ("conditional main print does not shadow builtin", "def f(x):\n    print(x)\nif __name__ == '__main__':\n    print = lambda *a: None\n", "f", ["does I/O: print"]),
+    ("conditional module def open does not shadow builtin", "import sys\nif sys.version_info < (3, 9):\n    def open(p):\n        return p\ndef f(p):\n    return open(p)\n", "f", ["does I/O: open"]),
+    ("conditional module os assignment does not shadow unbound os", "if False:\n    os = 'linux'\ndef f():\n    return os.listdir('.')\n", "f", ["does I/O: os.listdir"]),
+    ("module del open does not shadow builtin", "open = lambda p: p\ndel open\ndef f(p):\n    return open(p)\n", "f", ["does I/O: open"]),
+    ("class body rhs reads outer os before binding", "import os\ndef f():\n    class C:\n        os = os.listdir('.')\n    return C\n", "f", ["does I/O: os.listdir"]),
+    ("class body reads outer os.environ before later binding", "import os\ndef f():\n    class C:\n        x = os.environ['PATH']\n        os = 'x'\n    return C\n", "f", ["does I/O: os.environ"]),
+    ("class body rhs reads builtin open before binding", "def f(p):\n    class C:\n        open = open(p).read()\n    return C\n", "f", ["does I/O: open"]),
+    ("class body conditional binding does not shadow outer os", "import os\ndef f(cond):\n    class C:\n        if cond:\n            os = 'x'\n        x = os.listdir('.')\n    return C\n", "f", ["does I/O: os.listdir"]),
+    ("class body unconditional binding shadows later use", "import os\ndef f():\n    class C:\n        os = 'x'\n        y = os.strip()\n    return C\n", "f", []),
+    ("nested param annotation evaluated in outer scope", "import time\ndef f():\n    def inner(time: time.time()):\n        return 1\n    return inner(1)\n", "f", ["not deterministic: time.time"]),
 ]
 fails = 0
 for i, (label, src, func, want) in enumerate(CASES):
@@ -1317,13 +1341,25 @@ for i, (label, src, func, want) in enumerate(CASES):
     fails += not ok
     if not ok:
         print("FAIL", label, f"got={got} want={want}", file=sys.stderr)
-# array-library warning kept, named once
-src = "import numpy as np\ndef f(x):\n    return np.sum(x)\n"
+# array-library warning kept when imported, skipped when shadowed by parameter
+src = "import numpy as np\ndef f(x):\n    return np.sum(x)\ndef g(np):\n    return np.strip()\n"
 f = os.path.join(d, "arr.py"); open(f, "w").write(src)
 w = describe(f, 2, "f", None, d)["warnings"]
 ok = any(x.startswith("already uses np,") for x in w); fails += not ok
 if not ok:
     print("FAIL numpy warning", w, file=sys.stderr)
+w2 = describe(f, 4, "g", None, d)["warnings"]
+ok2 = not any(x.startswith("already uses np,") for x in w2); fails += not ok2
+if not ok2:
+    print("FAIL shadowed numpy warning", w2, file=sys.stderr)
+# local parameter shadowing a top-level helper should not report it as a helper call
+src = "def open(x):\n    return x + 1\ndef f(open, x):\n    return open(x)\ndef g(x):\n    return open(x)\n"
+f = os.path.join(d, "hlp.py"); open(f, "w").write(src)
+wf = describe(f, 3, "f", None, d)["warnings"]
+wg = describe(f, 5, "g", None, d)["warnings"]
+if any(x.startswith("calls open,") for x in wf) or not any(x.startswith("calls open,") for x in wg):
+    fails += 1
+    print("FAIL helpers shadow", wf, wg, file=sys.stderr)
 sys.exit(1 if fails else 0)
 "#;
 
@@ -1393,6 +1429,49 @@ sys.exit(1 if fails else 0)
             .find(|h| h.name == "join_all")
             .unwrap_or_else(|| panic!("missing hotspot join_all; got {:?}", scanned.hotspots));
         assert!(h.portable() && h.blockers.is_empty(), "join_all should be portable, got {:?}", h.blockers);
+    }
+
+    #[test]
+    fn shadowed_stdlib_param_is_portable_in_scan() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-py-shadow-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("work.py"),
+            "import time\n\n\
+             def parse_clock(time: str, os: str) -> int:\n\
+             \x20   total = 0\n\
+             \x20   for _ in range(400):\n\
+             \x20       h, m, s = time.split(':')\n\
+             \x20       total += int(h) * 3600 + int(m) * 60 + int(s) + len(os.strip())\n\
+             \x20   return total\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app.py"),
+            "from work import parse_clock\n\n\
+             if __name__ == '__main__':\n\
+             \x20   print(sum(parse_clock('12:34:56', ' win ') for _ in range(300)))\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&dir, vec![python.into(), "app.py".into()], None);
+        let _ = fs::remove_dir_all(&dir);
+        let scanned = scanned.unwrap();
+        let h = scanned
+            .hotspots
+            .iter()
+            .find(|h| h.name == "parse_clock")
+            .unwrap_or_else(|| panic!("missing hotspot parse_clock; got {:?}", scanned.hotspots));
+        assert!(h.portable() && h.blockers.is_empty(), "parse_clock should be portable, got {:?}", h.blockers);
     }
 
     #[test]
