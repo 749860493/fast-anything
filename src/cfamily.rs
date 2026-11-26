@@ -2136,7 +2136,14 @@ mod tests {
     #[cfg(unix)]
     fn run_c(dir: &Path, cc: &str, sources: &[&str], disable: bool) -> String {
         let std: &[&str] = if sources.iter().any(|s| is_cpp_file(s)) { &["-std=c++17"] } else { &[] };
-        let built = Command::new(cc).args(C_FLAGS).args(std).args(sources).args(["-o", "app"]).current_dir(dir).output().unwrap();
+        let built = Command::new(cc)
+            .args(C_FLAGS)
+            .args(std)
+            .args(sources)
+            .args(["-o", "app"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
         let mut cmd = Command::new(dir.join("app"));
         if disable {
