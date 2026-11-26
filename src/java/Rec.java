@@ -132,9 +132,11 @@ final class FastAnythingRec {
                 if (!e.equals(v)) out.add(e);
             }
         } else if (v instanceof Double d) {
-            for (double x : new double[] {0, 1, -1, 1e300, Double.MIN_VALUE}) if (x != d) out.add(x);
+            for (double x : new double[] {0, -0.0, 1, -1, 1e300, Double.MIN_VALUE, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY})
+                if (Double.compare(x, d) != 0) out.add(x);
         } else if (v instanceof Float f) {
-            for (float x : new float[] {0, 1, -1, 1e30f, Float.MIN_VALUE}) if (x != f) out.add(x);
+            for (float x : new float[] {0, -0.0f, 1, -1, 1e30f, Float.MIN_VALUE, Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY})
+                if (Float.compare(x, f) != 0) out.add(x);
         } else if (v instanceof String s) {
             int mid = s.offsetByCodePoints(0, s.codePointCount(0, s.length()) / 2);
             for (String x : new String[] {s.substring(0, mid) + NON_ASCII[0] + s.substring(mid), s + NON_ASCII[1], NON_ASCII[2] + s, s + NON_ASCII[3], ""}) {
