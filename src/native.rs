@@ -424,12 +424,23 @@ pub fn replay(job_path: &Path) -> Result<()> {
             }
         };
         if rust_ns >= 0.0 {
-            v.micro =
-                Some(Micro { original_ns, rust_ns, speedup: if rust_ns > 0.0 { original_ns / rust_ns } else { 0.0 } });
+            let speedup = if rust_ns > 0.0 { original_ns / rust_ns } else { 0.0 };
+            v.micro = Some(Micro { original_ns, rust_ns, speedup, clock_ns: clock_ns() });
         }
     }
     fs::write(&job.out, serde_json::to_vec(&v)?)?;
     Ok(())
+}
+
+/// What one clock read costs here: the least of a thousand back-to-back reads. The recorders time
+/// each call of the original with a read before and after it, so about this much of original_ns
+/// is the clock.
+fn clock_ns() -> f64 {
+    let read = || {
+        let t = Instant::now();
+        t.elapsed()
+    };
+    (0..1000).map(|_| read()).min().unwrap_or_default().as_secs_f64() * 1e9
 }
 
 /// Same value, give or take float rounding.

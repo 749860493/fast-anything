@@ -1226,6 +1226,7 @@ pub const FLAVOR_C: Flavor = Flavor {
         "A `const T *` followed by a length arrives as a Vec, and the length parameter still arrives on its own.",
         "`const char *` arrives as a UTF-8 String: `strlen` and `s[i]` are bytes, use `as_bytes()` for the same behavior.",
         "Floats: compilers may fuse `a * b + c` into one FMA instruction (clang does on ARM), which rounds differently. If recorded results differ in the last digits, the original was built that way: use `f64::mul_add` there, or build the app with `-ffp-contract=off`.",
+        "`long double` arrives and returns as `f64`: the bridge and the recordings narrow it to `double`.",
         "Returns are numbers or bools. Undefined behavior in the original (overflow of signed ints, out-of-bounds reads) isn't a spec: match the defined cases.",
     ],
     floats: None,
@@ -2250,6 +2251,71 @@ mod tests {
         // both sides timed per call: within 3x of the original (through JSON it was 22x slower)
         let m = v.micro.expect("timed");
         assert!(m.rust_ns > 0.0 && m.rust_ns < 3.0 * m.original_ns, "{m:?}");
+        assert!(m.clock_ns > 0.0 && m.clock_ns < m.original_ns, "the clock is part of the original's time: {m:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn too_cheap_to_time_stays_off_and_microseconds_get_switched_on() {
+        let geo = "double dist2(double x1, double y1, double x2, double y2) {\n    double dx = x1 - x2, dy = y1 - y2;\n    return dx * dx + dy * dy;\n}\n";
+        let ranges = "/* Mean of [lo, hi), the slow way: NaN for an empty range (0/0). */\ndouble mean_of_range(long long lo, long long hi) {\n    double s = 0.0;\n    for (long long i = lo; i < hi; i++) s += (double) i;\n    return s / (double) (hi - lo);\n}\n";
+        let main = "#include <math.h>\n#include <stdio.h>\ndouble dist2(double x1, double y1, double x2, double y2);\ndouble mean_of_range(long long lo, long long hi);\nint main(void) {\n    double acc = 0.0, total = 0.0;\n    int empty = 0;\n    for (int i = 0; i < 200000; i++) acc += dist2(i * 1e-5, 1.0 - i * 1e-5, 0.5, 0.25);\n    for (int k = 0; k < 20000; k++) {\n        long long lo = k * 37 % 1000, hi = lo + (k % 50) * 100;\n        double m = mean_of_range(lo, hi);\n        if (isnan(m)) empty++;\n        else total += m;\n    }\n    printf(\"%.6f, total %.3f, empty ranges %d\\n\", acc, total, empty);\n    return 0;\n}\n";
+        let ports = [
+            (
+                "geo.dist2",
+                "pub fn dist2(x1: f64, y1: f64, x2: f64, y2: f64) -> Result<f64, String> {\n    let (dx, dy) = (x1 - x2, y1 - y2);\n    Ok(dx * dx + dy * dy)\n}\n",
+            ),
+            (
+                "ranges.mean_of_range",
+                "pub fn mean_of_range(lo: i64, hi: i64) -> Result<f64, String> {\n    if hi <= lo {\n        return Ok(0.0 / (hi - lo) as f64);\n    }\n    Ok((lo + hi - 1) as f64 / 2.0)\n}\n",
+            ),
+        ];
+        let files = [("geo.c", geo), ("ranges.c", ranges), ("main.c", main)];
+        let Some((dir, cc)) = enabled_c_project("cheap", &files, &ports) else {
+            eprintln!("no C compiler or cargo on PATH, skipping");
+            return;
+        };
+        for (id, _) in ports {
+            crate::pipeline::disable(&dir, Some(id)).unwrap();
+        }
+        // other tests building meanwhile can slow the recorded calls down: record those again
+        for _ in 0..5 {
+            if replay(&dir, "geo.dist2").too_cheap() {
+                break;
+            }
+            let out = crate::pipeline::port(&dir, Some("geo.dist2"), 200).unwrap();
+            fs::write(&out.lib_rs, ports[0].1).unwrap();
+            let ctx = Ctx::open(&dir).unwrap();
+            assert!(backend::build(&ctx, &ctx.state.ports["geo.dist2"]).unwrap().is_ok());
+        }
+        // what verify keeps for enable
+        let mut ctx = Ctx::open(&dir).unwrap();
+        let [cheap, costly] = ports.map(|(id, _)| {
+            let v = Verify { built: true, lang: Lang::C, ..replay(&dir, id) };
+            ctx.state.ports.get_mut(id).unwrap().verify = Some(v.clone());
+            v
+        });
+        ctx.save().unwrap();
+        let refused = crate::pipeline::enable(&dir, Some("geo.dist2"), false);
+        let switched = crate::pipeline::enable(&dir, Some("ranges.mean_of_range"), false);
+        let original = run_c(&dir, cc, &["main.c", "geo.c", "ranges.c"], true);
+        let enabled = run_c(&dir, cc, &["main.c", "geo.c", "ranges.c"], false);
+        let on = Ctx::open(&dir).unwrap().state.ports.values().map(|p| (p.id.clone(), p.enabled)).collect::<Vec<_>>();
+        let forced = crate::pipeline::enable(&dir, Some("geo.dist2"), true);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(cheap.ok() && cheap.too_cheap(), "{:?}", cheap.micro);
+        let refused = refused.unwrap_err().to_string();
+        assert!(
+            refused.starts_with("geo.dist2 takes about as long as reading the clock (")
+                && refused.contains(" in C, the clock "),
+            "{refused}"
+        );
+        assert!(costly.ok() && !costly.too_cheap() && !costly.slower(), "{:?}", costly.micro);
+        switched.unwrap();
+        assert_eq!(on, [("geo.dist2".to_string(), false), ("ranges.mean_of_range".to_string(), true)]);
+        assert!(original.ends_with("empty ranges 400\n"), "{original}");
+        assert_eq!(enabled, original);
+        forced.unwrap();
     }
 
     /// The typed glue generated into every C port, compiled here as it is there.

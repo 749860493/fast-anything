@@ -168,7 +168,7 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
                 if !v.ok() {
                     bail!("{agent} couldn't get {} right in {attempts} attempts", out.id);
                 }
-                if !v.slower() {
+                if !v.slower() && !v.too_cheap() {
                     show::next(&format!("fast-anything enable {}", out.id));
                 }
             }
@@ -181,7 +181,7 @@ fn run(cmd: Cmd, root: &Path) -> Result<()> {
             if !v.ok() {
                 bail!("{id} doesn't match the original yet");
             }
-            if !v.slower() {
+            if !v.slower() && !v.too_cheap() {
                 show::next(&format!("fast-anything enable {id}"));
             }
             Ok(())
