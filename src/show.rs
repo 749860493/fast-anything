@@ -6,6 +6,9 @@ use crate::report::ReportOut;
 use crate::state::{Ctx, Verify};
 use crate::ui::{self, bold, dim, green, red, rust, yellow};
 use crate::util::{nanos, secs, thousands, times};
+use anyhow::Result;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 fn bar(share: f64, width: usize) -> String {
     const PARTS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
@@ -266,9 +269,84 @@ pub fn status(ctx: &Ctx) {
     }
 }
 
+pub fn json(value: &impl Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+pub fn scan_json(s: &ScanOut) -> Value {
+    let hotspots: Vec<Value> = s
+        .hotspots
+        .iter()
+        .map(|h| {
+            json!({
+                "id": h.id,
+                "file": h.file,
+                "line": h.line,
+                "share": h.share,
+                "calls": h.ncalls,
+                "tottime": h.tottime,
+                "cumtime": h.cumtime,
+                "portable": h.portable(),
+                "worth_porting": h.worth_it(),
+                "why_not": h.why_not(),
+                "covered_by": h.covered_by,
+                "blockers": h.blockers,
+                "warnings": h.warnings,
+            })
+        })
+        .collect();
+    json!({
+        "command": s.command,
+        "wall_seconds": s.wall,
+        "hotspots": hotspots,
+        "notes": s.notes,
+    })
+}
+
+pub fn verify_json(id: &str, v: &Verify) -> Value {
+    let mut out = serde_json::to_value(v).unwrap_or(Value::Null);
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("id".into(), json!(id));
+        obj.insert("ok".into(), json!(v.ok()));
+        if !v.ok() {
+            obj.insert("fix".into(), json!(crate::pipeline::feedback(v)));
+        }
+    }
+    out
+}
+
+pub fn status_json(ctx: &Ctx) -> Value {
+    let s = &ctx.state;
+    let ports: serde_json::Map<String, Value> = s
+        .ports
+        .iter()
+        .map(|(id, p)| {
+            let mut v = serde_json::to_value(p).unwrap_or(Value::Null);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("stale".into(), json!(ctx.stale(p)));
+            }
+            (id.clone(), v)
+        })
+        .collect();
+    let lang = (!s.command.is_empty()).then_some(s.lang);
+    json!({
+        "command": s.command,
+        "lang": lang,
+        "wall_seconds": s.wall,
+        "ports": ports,
+        "bench": s.bench,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Lang;
+    use crate::hotspot::Hotspot;
+    use crate::state::{Failure, Micro, Port, State};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     #[test]
     fn long_ids_keep_the_function_name() {
@@ -295,5 +373,112 @@ mod tests {
         assert_ne!(status_a, status_b);
         assert_eq!(status_a.chars().count(), 32);
         assert!(status_a.ends_with("decodeArchive") && status_b.ends_with("checkHeader"));
+    }
+
+    #[test]
+    fn json_helpers_produce_valid_plain_json() {
+        let parse = |v: Value| -> Value {
+            let raw = serde_json::to_string_pretty(&v).unwrap();
+            assert!(!raw.contains("\x1b["), "no ANSI escapes: {raw}");
+            serde_json::from_str(&raw).unwrap()
+        };
+
+        let scan = ScanOut {
+            command: vec!["python".into(), "app.py".into()],
+            wall: 2.5,
+            hotspots: vec![
+                Hotspot {
+                    id: "fuzzy.lev".into(),
+                    file: "fuzzy.py".into(),
+                    line: 10,
+                    ncalls: 1000,
+                    share: 0.8,
+                    ..Hotspot::default()
+                },
+                Hotspot {
+                    id: "fuzzy.io".into(),
+                    file: "fuzzy.py".into(),
+                    line: 30,
+                    ncalls: 1,
+                    share: 0.2,
+                    blockers: vec!["does I/O".into()],
+                    ..Hotspot::default()
+                },
+            ],
+            notes: vec!["note".into()],
+        };
+        let parsed = parse(scan_json(&scan));
+        assert_eq!(parsed["command"], json!(["python", "app.py"]));
+        assert_eq!(parsed["wall_seconds"], 2.5);
+        assert_eq!(
+            (&parsed["hotspots"][0]["worth_porting"], &parsed["hotspots"][1]["why_not"]),
+            (&json!(true), &json!("does I/O"))
+        );
+
+        let ok_v = Verify {
+            built: true,
+            total: 10,
+            passed: 10,
+            micro: Some(Micro { original_ns: 100.0, rust_ns: 10.0, speedup: 10.0 }),
+            lang: Lang::Python,
+            ..Verify::default()
+        };
+        let ok_parsed = parse(verify_json("fuzzy.lev", &ok_v));
+        assert_eq!((&ok_parsed["id"], &ok_parsed["ok"]), (&json!("fuzzy.lev"), &json!(true)));
+        assert!(ok_parsed.get("fix").is_none());
+
+        let bad_v = Verify {
+            built: true,
+            total: 10,
+            passed: 9,
+            failed: 1,
+            failures: vec![Failure { case: 1, call: "lev('a','b')".into(), expected: "1".into(), got: "2".into() }],
+            ..Verify::default()
+        };
+        let bad_parsed = parse(verify_json("fuzzy.lev", &bad_v));
+        assert_eq!(bad_parsed["ok"], false);
+        assert!(bad_parsed["fix"].as_str().unwrap().contains("1 of 10"));
+
+        let empty_ctx = Ctx { root: PathBuf::from("."), fast: PathBuf::from(".fast"), state: State::default() };
+        let empty_status = parse(status_json(&empty_ctx));
+        assert!(empty_status["lang"].is_null() && empty_status["ports"] == json!({}));
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "fuzzy.lev".into(),
+            Port {
+                id: "fuzzy.lev".into(),
+                file: "fuzzy.py".into(),
+                module: "fuzzy".into(),
+                func: "lev".into(),
+                ext: "fa_fuzzy_lev".into(),
+                crate_dir: ".fast/ports/fuzzy.lev".into(),
+                recorded: 10,
+                calls_seen: 10,
+                verify: Some(ok_v),
+                enabled: true,
+                lang: Lang::Python,
+                owner: None,
+                line: 10,
+                sources: vec![],
+            },
+        );
+        let ctx = Ctx {
+            root: PathBuf::from("."),
+            fast: PathBuf::from(".fast"),
+            state: State {
+                command: vec!["python".into(), "app.py".into()],
+                lang: Lang::Python,
+                wall: 1.25,
+                ports,
+                ..State::default()
+            },
+        };
+        let status_parsed = parse(status_json(&ctx));
+        assert_eq!((&status_parsed["lang"], &status_parsed["wall_seconds"]), (&json!("python"), &json!(1.25)));
+        assert_eq!(
+            (&status_parsed["ports"]["fuzzy.lev"]["enabled"], &status_parsed["ports"]["fuzzy.lev"]["stale"]),
+            (&json!(true), &json!(false))
+        );
     }
 }
