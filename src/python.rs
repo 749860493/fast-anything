@@ -784,6 +784,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 - Python `str` indexes by Unicode code point: use `.chars()` (or bytes only after checking `is_ascii()`).\n\
 - Python ints don't overflow. `i64` is fine unless the recorded values are bigger.\n\
 - Floats must match within 1e-9 of their size (or of the largest value in the same list), and zeros keep their sign: -0.0 is not 0.0. Keep the same order of float operations.\n\
+- `.sum()` of an empty float iterator is -0.0 in Rust: start float sums with `fold(0.0, |a, x| a + x)`.\n\
 - Where Python raises, raise too (`PyValueError::new_err(...)`, `PyKeyError`, ...).\n\
 - Make it fast: no needless allocation or cloning, borrow inputs, `with_capacity`, fast paths for common cases.\n\
 - std only, unless a crate clearly pays off. Keep the function and module names as they are.\n\

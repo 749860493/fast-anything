@@ -462,6 +462,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 Use `s.encode_utf16()` for anything index- or length-based (bytes are fine after checking `is_ascii()`).\n\
 - JavaScript numbers are f64. Integer math is exact only up to 2^53; use `f64` unless the values are clearly small integers.\n\
 - Numbers must match within 1e-9 of their size (or of the largest value in the same array), and zeros keep their sign: -0 is not 0. Keep the same order of float operations.\n\
+- `.sum()` of an empty float iterator is -0.0 in Rust: start float sums with `fold(0.0, |a, x| a + x)`.\n\
 - Where JavaScript throws, return `Err(Error::from_reason(...))`.\n\
 - Each call crosses from JavaScript into Rust: keep conversions cheap, don't clone big inputs.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases.\n\

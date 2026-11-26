@@ -214,6 +214,7 @@ fast-anything recorded {recorded} real calls (out of {seen} while the app ran). 
 ## Rules\n\n\
 - Same result for every input, edge cases included: empty input, zero, negatives, non-ASCII text, very long input. verify tests these too.\n\
 - Floats must match within 1e-9 of their size (or of the largest value in the same array), and zeros keep their sign: -0.0 is not 0.0. Keep the same order of float operations.\n\
+- `.sum()` of an empty float iterator is -0.0 in Rust: start float sums with `fold(0.0, |a, x| a + x)`.\n\
 {rules}\
 - Return `Err(message)` where the original would fail.\n\
 - Make it fast: no needless allocation, borrow, `with_capacity`, fast paths for common cases. Threads are fine if the result is the same.\n\
