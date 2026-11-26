@@ -212,8 +212,14 @@ fn output_with_cpu(cmd: &mut Command) -> std::io::Result<(Output, Option<f64>)> 
         buf
     });
     let mut out = Vec::new();
-    if let Some(mut o) = stdout {
-        o.read_to_end(&mut out)?;
+    if let Some(mut o) = stdout
+        && let Err(e) = o.read_to_end(&mut out)
+    {
+        // don't leave the child running or unwaited for
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = errors.join();
+        return Err(e);
     }
     let err = errors.join().unwrap_or_default();
     let status = child.wait()?;
@@ -280,6 +286,8 @@ mod cpu {
     }
 
     /// A job object per run: it adds up the CPU time of every process in it, children included.
+    /// The child joins it just after spawn, so a process it starts before that isn't counted;
+    /// spawning with CREATE_SUSPENDED and resuming its main thread after joining would close that gap.
     pub struct Meter {
         job: Handle,
         attached: bool,
