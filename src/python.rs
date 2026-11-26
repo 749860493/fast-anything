@@ -1029,7 +1029,11 @@ mod tests {
             let ported = crate::pipeline::port(&dir, Some("work.crunch"), 10)
                 .unwrap_or_else(|e| panic!("port {cmd:?} failed: {e:#}"));
             assert_eq!(ported.calls_seen, 50, "recorded calls for {cmd:?}");
+            crate::pipeline::enable(&dir, Some("work.crunch"), true)
+                .unwrap_or_else(|e| panic!("enable {cmd:?} failed: {e:#}"));
             crate::pipeline::bench(&dir, 1).unwrap_or_else(|e| panic!("bench {cmd:?} failed: {e:#}"));
+            crate::pipeline::disable(&dir, Some("work.crunch"))
+                .unwrap_or_else(|e| panic!("disable {cmd:?} failed: {e:#}"));
         }
         let _ = fs::remove_dir_all(&dir);
     }
