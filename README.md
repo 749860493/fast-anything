@@ -46,7 +46,7 @@ Or step by step:
 | `port [id]` | records up to 500 real calls, creates a one-function Rust crate + `TASK.md` |
 | `verify` | release-builds the port and replays every recorded call |
 | `enable` / `disable` | swaps the Rust in or out (one marked block, removed byte for byte) |
-| `bench` | times the whole app in rotated rounds of original, original again (an A/A control for noise) and Rust; wall and CPU time |
+| `bench` | times the whole app in rotated rounds of original, original again (an A/A control for noise) and Rust, plus one warm-up per side (`--runs 5` = 11 original runs, 6 Rust runs); wall and CPU time |
 | `report` | markdown + SVG card for your PR |
 | `doctor` | checks Rust, your runtimes and your agents |
 
