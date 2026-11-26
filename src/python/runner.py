@@ -362,24 +362,29 @@ def imports_in(node):
 
 
 def binds(node):
-    """Names `node` binds in the scope it sits in, other than by importing."""
+    """(name, is_del) pairs `node` binds or deletes in the scope it sits in, other than by importing."""
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-        return [node.id]
+        return [(node.id, isinstance(node.ctx, ast.Del))]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return [node.name]
+        return [(node.name, False)]
     if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
-        return [node.name]
+        return [(node.name, False)]
     if isinstance(node, ast.MatchMapping) and node.rest:
-        return [node.rest]
+        return [(node.rest, False)]
     return []
 
 
 def evaluated_outside(scope):
-    """The parts of a scope node that run in the scope around it: decorators, defaults, class bases,
-    a comprehension's first iterable."""
+    """The parts of a scope node that run in the scope around it: decorators, defaults, annotations,
+    class bases, a comprehension's first iterable."""
     if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         args = scope.args
         parts = list(args.defaults) + [d for d in args.kw_defaults if d is not None]
+        if not isinstance(scope, ast.Lambda):
+            all_args = args.posonlyargs + args.args + args.kwonlyargs + [v for v in (args.vararg, args.kwarg) if v]
+            parts += [x.annotation for x in all_args if x.annotation is not None]
+            if scope.returns is not None:
+                parts.append(scope.returns)
         return parts + list(getattr(scope, "decorator_list", []))
     if isinstance(scope, ast.ClassDef):
         return list(scope.decorator_list) + list(scope.bases) + [k.value for k in scope.keywords]
@@ -387,7 +392,7 @@ def evaluated_outside(scope):
 
 
 def header_binds(st):
-    """What a statement binds outside its blocks (assignment, for and with targets...), not entering scopes."""
+    """What a statement binds or deletes outside its blocks, not entering scopes."""
     if isinstance(st, SCOPES):
         return binds(st)
     if isinstance(st, ast.AnnAssign) and st.value is None:
@@ -413,9 +418,10 @@ def bound_at(st):
 
 
 def bindings(stmts, maybe=False, out=None):
-    """(position, name, dotted names, maybe) for each binding in `stmts`, in order. An import binds what it
-    imports, anything else binds nothing known. A binding inside an if/try/with/for/while/match block, or a
-    for target, may or may not have happened."""
+    """(position, name, dotted names | None for del, maybe) for each binding in `stmts`, in order.
+    An import binds what it imports, any other binding binds nothing known (empty frozenset), and `del`
+    records None. A binding inside an if/try/with/for/while/match block, or a for target, may or may not
+    have happened."""
     out = [] if out is None else out
     for st in stmts:
         pos = bound_at(st)
@@ -423,7 +429,7 @@ def bindings(stmts, maybe=False, out=None):
             out.append((pos, name, frozenset(targets), maybe))
         if not isinstance(st, (ast.Import, ast.ImportFrom)):
             loop = isinstance(st, (ast.For, ast.AsyncFor))
-            out += [(pos, name, frozenset(), maybe or loop) for name in header_binds(st)]
+            out += [(pos, name, None if is_del else frozenset(), maybe or loop) for name, is_del in header_binds(st)]
         if not isinstance(st, SCOPES):
             for f in BLOCKS:
                 bindings(getattr(st, f, None) or [], True, out)
@@ -432,17 +438,26 @@ def bindings(stmts, maybe=False, out=None):
 
 def state(entries, names=None, before=None):
     """What each name stands for after `entries` (up to position `before`): a later plain binding replaces
-    an earlier one, a maybe-binding adds to it."""
+    an earlier one, a plain `del` removes it, and a maybe-binding only adds known import targets."""
     names = dict(names or {})
     for pos, name, targets, maybe in entries:
         if before is None or pos < before:
-            names[name] = names.get(name, frozenset()) | targets if maybe else targets
+            if targets is None:
+                if not maybe:
+                    names.pop(name, None)
+            elif maybe:
+                if targets:
+                    names[name] = names.get(name, frozenset()) | targets
+            else:
+                names[name] = targets
     return names
 
 
 def module_names(tree):
-    """What each name stands for at module level, after the whole module ran (imported names only)."""
-    return {name: targets for name, targets in state(bindings(tree.body)).items() if targets}
+    """What each name stands for at module level, after the whole module ran (imports map to their
+    dotted targets; unconditional plain module-level bindings map to an empty frozenset so they shadow
+    globals)."""
+    return state(bindings(tree.body))
 
 
 def scope_bindings(scope):
@@ -456,65 +471,86 @@ def scope_bindings(scope):
     if isinstance(scope, ast.ClassDef):
         return bindings(scope.body)
     # a comprehension binds its targets
-    return [((0, 0), name, frozenset(), False) for g in scope.generators for n in ast.walk(g.target) for name in binds(n)]
+    return [((0, 0), name, frozenset(), False) for g in scope.generators for n in ast.walk(g.target) for name, _ in binds(n)]
 
 
-def resolved_calls(function, module_level):
-    """Calls in `function` (nested scopes included) whose first name stands for an imported module or
-    function at that call, with what it stands for. Follows Python's scoping: a scope's own bindings hide
-    the outer ones (the last one before the call counts), a class body is no scope for the functions in
-    it, and decorators, defaults and a comprehension's first iterable run in the scope around."""
-    found = []
+def scoped_refs(function, module_level):
+    """(calls, state_reads) inside `function` (nested scopes included), each paired with (origins, is_local):
+    origins is None if unbound anywhere in the module, frozenset() if shadowed by a plain local/parameter/
+    module binding, or a non-empty frozenset of imported dotted targets; is_local is True when resolved to
+    a local/parameter/closure/class-body binding rather than module globals."""
+    calls, reads = [], []
     flat = {}
 
     def lookup(env, name, at):
-        local, outer = env
+        local, outer, is_class = env
         if name in local:
             entries, imported = local[name]
+            if is_class:
+                cur = state(entries, before=at)
+                if name not in cur:
+                    return outer.get(name, (None, False))
+                if any(pos < at and not maybe for pos, _, _, maybe in entries):
+                    return cur[name], True
+                outer_origins = outer[name][0] if name in outer else None
+                return (cur[name] | outer_origins if outer_origins else cur[name]), True
             if not imported:
-                return frozenset()  # a plain local
-            return state(entries, before=at).get(name, frozenset())
-        return outer.get(name, frozenset())
+                return frozenset(), True  # a plain local
+            return state(entries, before=at).get(name, frozenset()), True
+        return outer.get(name, (None, False))
 
-    def visit(node, env, fn_env, skip):
+    def visit(node, env, fn_env, skip, called_attrs):
         for child in ast.iter_child_nodes(node):
             if id(child) in skip:
                 continue
             if isinstance(child, SCOPES):
-                enter(child, env, fn_env)
+                enter(child, env, fn_env, called_attrs)
                 continue
             if isinstance(child, ast.Call):
                 target = dotted(child.func)
                 if target:
-                    origins = lookup(env, target[0], (child.lineno, child.col_offset))
-                    if origins:
-                        found.append((target, origins))
-            visit(child, env, fn_env, skip)
+                    origins, is_local = lookup(env, target[0], (child.lineno, child.col_offset))
+                    calls.append((target, origins, is_local))
+            elif isinstance(child, ast.Attribute) and id(child) not in called_attrs:
+                target = dotted(child)
+                if target:
+                    origins, _ = lookup(env, target[0], (child.lineno, child.col_offset))
+                    reads.append((target, origins))
+            visit(child, env, fn_env, skip, called_attrs)
 
     def flatten(env):
         """An env as plain names, for a nested scope to start from (its own bindings come on top)."""
         if id(env) not in flat:
-            local, outer = env
+            local, outer, _ = env
             names = dict(outer)
             for name, (entries, _) in local.items():
-                names[name] = state(entries).get(name, frozenset())
+                names[name] = (state(entries).get(name, frozenset()), True)
             flat[id(env)] = (env, names)  # keep env alive so its id isn't reused
         return flat[id(env)][1]
 
-    def enter(scope, env, fn_env):
+    def enter(scope, env, fn_env, called_attrs):
         heads = evaluated_outside(scope)
         for h in heads:
-            visit(ast.Expr(value=h), env, fn_env, frozenset())
+            visit(ast.Expr(value=h), env, fn_env, frozenset(), called_attrs)
         entries = {}
         for entry in scope_bindings(scope):
             entries.setdefault(entry[1], []).append(entry)
         own = {name: (es, any(e[2] for e in es)) for name, es in entries.items()}
         is_class = isinstance(scope, ast.ClassDef)
-        inner = (own, flatten(fn_env))  # a class body sees the enclosing function, never an outer class body
-        visit(scope, inner, fn_env if is_class else inner, frozenset(map(id, heads)))
+        inner = (own, flatten(fn_env), is_class)  # a class body sees the enclosing function, never an outer class body
+        visit(scope, inner, fn_env if is_class else inner, frozenset(map(id, heads)), called_attrs)
 
-    enter(function, ({}, module_level), ({}, module_level))
-    return found
+    called_attrs = set()
+    for sub in ast.walk(function):
+        if isinstance(sub, ast.Call):
+            n = sub.func
+            while isinstance(n, ast.Attribute):
+                called_attrs.add(id(n))
+                n = n.value
+
+    mod_outer = {k: (v, False) for k, v in module_level.items()}
+    enter(function, ({}, mod_outer, False), ({}, mod_outer, False), called_attrs)
+    return calls, reads
 
 
 def is_pure_call(name):
@@ -638,57 +674,77 @@ def describe(path, line, name, entry, base):
         factor *= 0.7
 
     io, nondet, arrays, helpers = set(), set(), set(), set()
-    called = set()  # the a.b of a call a.b.c(...), which the call check already judged
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            n = sub.func
-            while isinstance(n, ast.Attribute):
-                called.add(id(n))
-                n = n.value
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Attribute) and id(sub) not in called:
-            read = ".".join(dotted(sub) or [])
+    calls, state_reads = scoped_refs(node, module_level_names)
+    for target, origins in state_reads:
+        if origins is None:
+            read = ".".join(target)
             if read in STATE_READS:
                 io.add(read)
+        elif origins:
+            for origin in origins:
+                if origin:
+                    read = ".".join(list(origin) + target[1:])
+                    if read in STATE_READS:
+                        io.add(read)
     is_generator = writes_globals = False
     for sub in ast.walk(node):
         if isinstance(sub, (ast.Yield, ast.YieldFrom)):
             is_generator = True
         elif isinstance(sub, (ast.Global, ast.Nonlocal)):
             writes_globals = True
-        elif isinstance(sub, ast.Call):
-            target = dotted(sub.func)
-            if not target:
-                continue
-            head = target[0]
-            if len(target) == 1:
-                if head in IO_NAMES:
+    for target, origins, is_local in calls:
+        head = target[0]
+        if len(target) == 1:
+            if head in IO_NAMES:
+                if origins is None:
                     io.add(head)
-                elif head in top and head != node.name:
+                elif origins:
+                    matched = False
+                    for origin in origins:
+                        effect = origin and resolved_effect(list(origin))
+                        if effect:
+                            (io if effect[0] == "io" else nondet).add(effect[1])
+                            matched = True
+                    if not matched:
+                        io.add(head)
+                elif head in top and head != node.name and not is_local:
                     helpers.add(head)
-            elif head in IO_MODULES:
-                call_name = ".".join(target)
+            else:
+                if head in top and head != node.name and not is_local and not origins:
+                    helpers.add(head)
+                for origin in origins or ():
+                    effect = origin and resolved_effect(list(origin))
+                    if effect:
+                        (io if effect[0] == "io" else nondet).add(effect[1])
+        elif origins is None:
+            # Unbound in this file (e.g. from-star import or snippet): fall back to stdlib name check.
+            call_name = ".".join(target)
+            if head in IO_MODULES:
                 if not is_pure_call(call_name):
                     io.add(call_name)
             elif head in NONDET_MODULES:
-                call_name = ".".join(target)
                 if not is_pure_call(call_name):
                     nondet.add(call_name)
             elif head in ARRAY_LIBS:
                 arrays.add(head)
-    # the same calls through an import: `sp.run` is subprocess.run, `system` is os.system
-    for target, origins in resolved_calls(node, module_level_names):
-        head = target[0]
-        if (
-            head in IO_NAMES
-            if len(target) == 1
-            else (head in IO_MODULES or head in NONDET_MODULES) and not is_pure_call(".".join(target))
-        ):
-            continue  # already caught by name
-        for origin in origins:
-            effect = origin and resolved_effect(list(origin) + target[1:])
-            if effect:
-                (io if effect[0] == "io" else nondet).add(effect[1])
+        elif origins:
+            for origin in origins:
+                if not origin:
+                    continue
+                if origin[0] in ARRAY_LIBS and head in ARRAY_LIBS:
+                    arrays.add(head)
+                full = list(origin) + target[1:]
+                effect = resolved_effect(full)
+                if effect:
+                    kind_eff, label = effect
+                    call_name = ".".join(target)
+                    # Keep the written call name when it matches the module/submodule directly
+                    # (e.g. `from datetime import datetime; datetime.now()` or `from numpy import random; random.random()`).
+                    if (
+                        origin[0] == head and (head in IO_MODULES or head in NONDET_MODULES) and not is_pure_call(call_name)
+                    ) or (head == "random" and origin == ("numpy", "random")):
+                        label = call_name
+                    (io if kind_eff == "io" else nondet).add(label)
     if is_generator:
         blockers.append("generator (yield)")
     if writes_globals:
