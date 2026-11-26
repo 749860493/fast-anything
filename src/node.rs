@@ -2122,6 +2122,200 @@ assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALU
             "f",
             &[],
         ),
+        (
+            "param named document and window",
+            "export function f(document, window) {\n  return document.length + window;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "local const named window and fs",
+            "export function f(xs) {\n  const window = 4, fs = 44100;\n  return xs.length + window + fs;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "property access named process and fetch",
+            "export function f(row) {\n  return row.process + row.fetch + row.document;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "object key named document and window",
+            "export function f(x) {\n  return { document: x, window: x + 1 };\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "method shorthand named fetch and process",
+            "export function f(x) {\n  return { fetch(v) { return v + 1; }, process(v) { return v * 2; } }.fetch(x);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "crypto.createHash through default crypto import",
+            "import crypto from \"node:crypto\";\nexport function f(s) {\n  return crypto.createHash(\"sha256\").update(s).digest(\"hex\");\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "crypto.randomUUID through default crypto import still blocks",
+            "import crypto from \"node:crypto\";\nexport function f() {\n  return crypto.randomUUID();\n}\n",
+            "f",
+            &["not deterministic: crypto.randomUUID"],
+        ),
+        (
+            "global crypto.getRandomValues still blocks",
+            "export function f(buf) {\n  return crypto.getRandomValues(buf);\n}\n",
+            "f",
+            &["not deterministic: crypto.getRandomValues"],
+        ),
+        (
+            "fs.constants through default fs import is pure",
+            "import fs from \"node:fs\";\nexport function f(mode) {\n  return (mode & fs.constants.R_OK) !== 0;\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "globalThis.fetch still blocks",
+            "export function f(url) {\n  return globalThis.fetch(url);\n}\n",
+            "f",
+            &["does I/O: fetch"],
+        ),
+        (
+            "shadowed in nested arrow, real global outside still blocks",
+            "export function f(xs) {\n  const a = xs.map((window) => window + 1);\n  return a.length + process.pid;\n}\n",
+            "f",
+            &["does I/O: process"],
+        ),
+        ("param named Date shadows new Date", "export function f(Date) {\n  return new Date(1);\n}\n", "f", &[]),
+        ("property import does not block", "export function f(obj) {\n  return obj.import(1);\n}\n", "f", &[]),
+        (
+            "method shorthand named import does not block",
+            "export function f(x) {\n  return { import(v) { return v + 1; } }.import(x);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "dollar-prefixed $import is not dynamic import",
+            "export function f(p) {\n  return $import(p);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "real dynamic import still blocks",
+            "export function f(p) {\n  return import(p);\n}\n",
+            "f",
+            &["does I/O: import("],
+        ),
+        (
+            "spread of process.env still blocks",
+            "export function f() {\n  return { ...process.env };\n}\n",
+            "f",
+            &["does I/O: process"],
+        ),
+        (
+            "spread of crypto.getRandomValues still blocks",
+            "export function f(a) {\n  return [...crypto.getRandomValues(a)];\n}\n",
+            "f",
+            &["not deterministic: crypto.getRandomValues"],
+        ),
+        (
+            "spread of fs.readdirSync still blocks",
+            "import fs from \"node:fs\";\nexport function f() {\n  return [...fs.readdirSync(\".\")];\n}\n",
+            "f",
+            &["does I/O: fs"],
+        ),
+        (
+            "spread of imported env still blocks",
+            "import { env } from \"node:process\";\nexport function f() {\n  return { ...env };\n}\n",
+            "f",
+            &["does I/O: process.env"],
+        ),
+        (
+            "optional chain globalThis?.fetch still blocks",
+            "export function f(url) {\n  return globalThis?.fetch(url);\n}\n",
+            "f",
+            &["does I/O: fetch"],
+        ),
+        (
+            "optional chain global?.process still blocks",
+            "export function f() {\n  return global?.process.pid;\n}\n",
+            "f",
+            &["does I/O: process"],
+        ),
+        (
+            "optional chain globalThis?.crypto.randomUUID still blocks",
+            "export function f() {\n  return globalThis?.crypto.randomUUID();\n}\n",
+            "f",
+            &["not deterministic: crypto.randomUUID"],
+        ),
+        (
+            "globalThis.fetch bypasses param named fetch",
+            "export function f(fetch, url) {\n  return globalThis.fetch(url) + fetch;\n}\n",
+            "f",
+            &["does I/O: fetch"],
+        ),
+        (
+            "globalThis.fetch bypasses local const named fetch",
+            "export function f(url) {\n  const fetch = 1;\n  return globalThis.fetch(url) + fetch;\n}\n",
+            "f",
+            &["does I/O: fetch"],
+        ),
+        (
+            "globalThis.fetch bypasses pure import aliased as fetch",
+            "import { join as fetch } from \"node:path\";\nexport function f(url) {\n  return globalThis.fetch(url);\n}\n",
+            "f",
+            &["does I/O: fetch"],
+        ),
+        (
+            "globalThis.crypto.randomUUID bypasses param named crypto",
+            "export function f(crypto) {\n  return globalThis.crypto.randomUUID();\n}\n",
+            "f",
+            &["not deterministic: crypto.randomUUID"],
+        ),
+        (
+            "multiline property x.globalThis.fetch is not global",
+            "export function f(x) {\n  return x.\n    globalThis.fetch(1);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "pure module imported as fs is not I/O",
+            "import fs from \"node:path\";\nexport function f(a, b) {\n  return fs.join(a, b);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "node:crypto imported as fs reports crypto.randomUUID",
+            "import fs from \"node:crypto\";\nexport function f() {\n  return fs.randomUUID();\n}\n",
+            "f",
+            &["not deterministic: crypto.randomUUID"],
+        ),
+        (
+            "non-builtin package imported as crypto is not nondet",
+            "import crypto from \"my-pure-lib\";\nexport function f(x) {\n  return crypto.sign(x);\n}\n",
+            "f",
+            &[],
+        ),
+        (
+            "ASI after obj.const does not shadow next-line fetch",
+            "export function f(obj, url) {\n  const a = obj.const\n  fetch(url)\n  return a\n}\n",
+            "f",
+            &["does I/O: fetch"],
+        ),
+        (
+            "mixed fs.constants and fs.readFileSync still blocks",
+            "import fs from \"node:fs\";\nexport function f(p) {\n  return fs.constants.R_OK + fs.readFileSync(p).length;\n}\n",
+            "f",
+            &["does I/O: fs"],
+        ),
+        (
+            "mixed crypto.createHash and crypto.randomUUID still blocks",
+            "import crypto from \"node:crypto\";\nexport function f(s) {\n  return crypto.createHash(\"sha256\").update(s).digest(\"hex\") + crypto.randomUUID();\n}\n",
+            "f",
+            &["not deterministic: crypto.randomUUID"],
+        ),
     ];
 
     #[test]
@@ -2806,5 +3000,48 @@ assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALU
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn shadowed_io_names_and_pure_crypto_are_portable_in_scan() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let tmp = std::env::temp_dir();
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-node-io-shadow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("work.mjs"),
+            "import crypto from \"node:crypto\";\n\
+             import fs from \"node:fs\";\n\n\
+             export function scoreDoc(document, window, row) {\n\
+               let total = 0;\n\
+               for (let i = 0; i < 4000; i++) {\n\
+                 total += (document.length + window + row.process + (i & fs.constants.R_OK)) % 97;\n\
+               }\n\
+               return crypto.createHash(\"sha256\").update(String(total)).digest(\"hex\");\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app.mjs"),
+            "import { scoreDoc } from \"./work.mjs\";\n\
+             let acc = 0;\n\
+             for (let r = 0; r < 1500; r++) acc += scoreDoc(\"hello\", 8, { process: 3 }).length;\n\
+             console.log(acc);\n",
+        )
+        .unwrap();
+        let scanned = crate::pipeline::scan(&dir, vec!["node".into(), "app.mjs".into()], None);
+        let _ = fs::remove_dir_all(&dir);
+        let scanned = scanned.unwrap();
+        let h = scanned
+            .hotspots
+            .iter()
+            .find(|h| h.name == "scoreDoc")
+            .unwrap_or_else(|| panic!("missing hotspot scoreDoc; got {:?}", scanned.hotspots));
+        assert!(h.portable() && h.blockers.is_empty(), "scoreDoc should be portable, got {:?}", h.blockers);
     }
 }
