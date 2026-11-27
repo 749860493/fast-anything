@@ -19,13 +19,34 @@ pub struct ScanOut {
     pub notes: Vec<String>,
     /// Where what the app printed while it was profiled is kept; None when it printed nothing.
     pub app_output: Option<PathBuf>,
+    /// Median time of the app without the profiler, when the scan was calibrated.
+    pub unprofiled: Option<f64>,
 }
+
+impl ScanOut {
+    /// How many times slower the profiled run was than the app on its own.
+    pub fn overhead(&self) -> Option<f64> {
+        self.unprofiled.filter(|&u| u > 0.0 && self.wall > 0.0).map(|u| self.wall / u)
+    }
+}
+
+/// Runs of the app without the profiler for  scan --calibrate.
+pub const CALIBRATION_RUNS: usize = 3;
 
 /// `duration`: stop the app after that many seconds (a GUI or a server that doesn't exit on its own).
 pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<ScanOut> {
+    scan_with(root, command, duration, false)
+}
+
+/// `calibrate`: also time the app without the profiler, so the profiler's overhead is known (#142).
+pub fn scan_with(root: &Path, command: Vec<String>, duration: Option<f64>, calibrate: bool) -> Result<ScanOut> {
     ensure!(
         !command.is_empty(),
         "put the command that runs your app after --, e.g.  fast-anything scan -- python app.py"
+    );
+    ensure!(
+        !(calibrate && duration.is_some()),
+        "--calibrate times the app until it exits, so it can't be used with --duration"
     );
     let mut ctx = Ctx::open(root)?;
     let command = match crate::python::unwrap_env_runner(&command, |argv| env_runner_output(&ctx.root, argv))? {
@@ -73,8 +94,18 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
     ctx.state.base = profile.base;
     ctx.state.wall = profile.wall;
     ctx.state.hotspots = hotspots.clone();
+    ctx.state.unprofiled = None;
     ctx.save()?;
-    Ok(ScanOut { command, wall: profile.wall, hotspots, notes, app_output })
+    let unprofiled = if calibrate {
+        ui::step(format!("timing it {CALIBRATION_RUNS} times without the profiler"));
+        let u = bench::unprofiled(&ctx, CALIBRATION_RUNS).context("timing the app without the profiler")?;
+        ctx.state.unprofiled = Some(u);
+        ctx.save()?;
+        Some(u)
+    } else {
+        None
+    };
+    Ok(ScanOut { command, wall: profile.wall, hotspots, notes, app_output, unprofiled })
 }
 
 /// Keep what the app printed, so a successful scan doesn't swallow it (#142).

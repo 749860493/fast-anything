@@ -42,7 +42,8 @@ pub fn next(cmd: &str) {
 }
 
 pub fn scan(s: &ScanOut) {
-    ui::ok(format!("{} ran in {}", bold(s.command.join(" ")), secs(s.wall)));
+    ui::ok(format!("{} ran in {} under the profiler", bold(s.command.join(" ")), secs(s.wall)));
+    ui::line(format!("  {}", dim(overhead_line(s))));
     ui::line("");
     if s.hotspots.is_empty() {
         ui::line("  No functions from your own code showed up. Is the app doing its work in a library?");
@@ -92,6 +93,19 @@ pub fn scan(s: &ScanOut) {
         None => {
             ui::line("  Nothing portable takes a real share of the run yet. The ✗ reasons above say what's in the way.")
         }
+    }
+}
+
+/// What the profiler did to the run's time (#142): measured with --calibrate, or a pointer to it.
+fn overhead_line(s: &ScanOut) -> String {
+    match (s.unprofiled, s.overhead()) {
+        (Some(u), Some(x)) => format!(
+            "without it the app takes {} (median of {}): the profiler made it {} slower, and shares are of the profiled run",
+            secs(u).trim(),
+            crate::pipeline::CALIBRATION_RUNS,
+            times(x)
+        ),
+        _ => "times include the profiler's overhead; --calibrate also times the app without it".into(),
     }
 }
 
@@ -265,7 +279,11 @@ pub fn status(ctx: &Ctx) {
         next("fast-anything scan -- python your_app.py");
         return;
     }
-    ui::line(format!("  app: {}   profiled run: {}", bold(s.command.join(" ")), secs(s.wall)));
+    let alone = match s.unprofiled {
+        Some(u) => format!("   without the profiler: {}", secs(u)),
+        None => String::new(),
+    };
+    ui::line(format!("  app: {}   profiled run: {}{alone}", bold(s.command.join(" ")), secs(s.wall)));
     if s.ports.is_empty() {
         ui::line("  Nothing ported yet.");
         if let Some(h) = s.hotspots.iter().find(|h| h.worth_it()) {
@@ -339,6 +357,8 @@ pub fn scan_json(s: &ScanOut) -> Value {
         "hotspots": hotspots,
         "notes": s.notes,
         "app_output": s.app_output,
+        "unprofiled_seconds": s.unprofiled,
+        "profiler_overhead": s.overhead(),
     })
 }
 
@@ -372,6 +392,7 @@ pub fn status_json(ctx: &Ctx) -> Value {
         "command": s.command,
         "lang": lang,
         "wall_seconds": s.wall,
+        "unprofiled_seconds": s.unprofiled,
         "ports": ports,
         "bench": s.bench,
     })
@@ -451,9 +472,13 @@ mod tests {
             ],
             notes: vec!["note".into()],
             app_output: Some(PathBuf::from(".fast/app.log")),
+            unprofiled: Some(1.25),
         };
         let parsed = parse(scan_json(&scan));
         assert_eq!(parsed["app_output"], ".fast/app.log");
+        assert_eq!(parsed["unprofiled_seconds"], 1.25);
+        assert_eq!(parsed["profiler_overhead"], 2.0);
+        assert!(overhead_line(&scan).contains("the profiler made it 2.0× slower"), "{}", overhead_line(&scan));
         assert_eq!(parsed["command"], json!(["python", "app.py"]));
         assert_eq!(parsed["wall_seconds"], 2.5);
         assert_eq!(

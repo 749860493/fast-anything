@@ -23,7 +23,7 @@ fn tools() -> Value {
         tool(
             "fast_scan",
             "Run the app under a profiler and rank functions by time share and portability to Rust.",
-            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R and C#: stop the app after this many seconds (GUIs, servers)" }, "path": path }),
+            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R and C#: stop the app after this many seconds (GUIs, servers)" }, "calibrate": { "type": "boolean", "description": "Also time the app 3 times without the profiler and return the profiler's overhead (not with duration)" }, "path": path }),
             json!(["command"])
         ),
         tool(
@@ -76,7 +76,12 @@ fn call(params: &Value) -> Result<Value> {
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            let scan = pipeline::scan(&root, command, args["duration"].as_f64())?;
+            let scan = pipeline::scan_with(
+                &root,
+                command,
+                args["duration"].as_f64(),
+                args["calibrate"].as_bool() == Some(true),
+            )?;
             let top: Vec<Value> = scan
                 .hotspots
                 .iter()
@@ -86,7 +91,7 @@ fn call(params: &Value) -> Result<Value> {
                                   "blockers": h.blockers, "warnings": h.warnings, "file": h.file, "line": h.line })
                 })
                 .collect();
-            json!({ "wall_seconds": scan.wall, "hotspots": top, "notes": scan.notes })
+            json!({ "wall_seconds": scan.wall, "unprofiled_seconds": scan.unprofiled, "profiler_overhead": scan.overhead(), "hotspots": top, "notes": scan.notes })
         }
         "fast_port" => {
             let samples = args["samples"].as_u64().unwrap_or(500) as usize;

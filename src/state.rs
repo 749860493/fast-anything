@@ -26,6 +26,9 @@ pub struct State {
     /// Folder Python imports the app's modules from, relative to the project.
     pub base: String,
     pub wall: f64,
+    /// Median time of the app without the profiler, from  scan --calibrate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unprofiled: Option<f64>,
     pub hotspots: Vec<Hotspot>,
     pub ports: BTreeMap<String, Port>,
     pub bench: Option<BenchResult>,

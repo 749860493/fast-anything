@@ -76,6 +76,9 @@ enum Cmd {
         /// Stop the app after this many seconds and rank what ran (Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R, C#: servers and GUIs that don't exit)
         #[arg(long, value_name = "SECS")]
         duration: Option<f64>,
+        /// Also time the app 3 times without the profiler, to show how much profiling slowed it down
+        #[arg(long, conflicts_with = "duration")]
+        calibrate: bool,
         /// How you run your app, after --
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -289,8 +292,8 @@ fn run(cmd: Cmd, root: &Path, json: bool) -> Result<()> {
         Cmd::Go { agent, top, attempts, runs, samples, command } => {
             pipeline::go(root, command, agent.as_deref(), top, attempts, runs, samples)
         }
-        Cmd::Scan { command, duration } => {
-            let out = pipeline::scan(root, command, duration)?;
+        Cmd::Scan { command, duration, calibrate } => {
+            let out = pipeline::scan_with(root, command, duration, calibrate)?;
             if json {
                 show::json(&show::scan_json(&out))
             } else {

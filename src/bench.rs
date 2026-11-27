@@ -472,6 +472,14 @@ pub fn first_difference(original: &[u8], rust: &[u8]) -> Option<String> {
     unreachable!()
 }
 
+/// The original app's median time over `runs` runs without the profiler: how much a scan's
+/// profiled run was slowed down by profiling (#142).
+pub fn unprofiled(ctx: &Ctx, runs: usize) -> Result<f64> {
+    let (exe, args) = ctx.state.lang.bench_command(ctx)?;
+    let walls = (0..runs).map(|_| time_once(ctx, &exe, &args, true).map(|r| r.wall)).collect::<Result<Vec<_>>>()?;
+    Ok(Stats::of(&walls).median)
+}
+
 pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
     let (exe, args) = ctx.state.lang.bench_command(ctx)?;
     let (exe, args) = (exe.as_str(), args.as_slice());
