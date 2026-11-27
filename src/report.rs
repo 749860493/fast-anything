@@ -1,10 +1,11 @@
 //! A report worth sharing: markdown for the PR, an SVG card for the README / socials.
 
+use crate::android::{self, Evidence};
 use crate::bench::{BenchResult, Scope, Verdict};
 use crate::hotspot::Hotspot;
 use crate::state::{Ctx, Port, State};
 use crate::util::{nanos, secs, thousands, times};
-use anyhow::{Context, Result};
+use anyhow::{Result, bail, ensure};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +13,12 @@ use std::path::PathBuf;
 #[derive(Serialize)]
 pub struct ReportOut {
     pub markdown: PathBuf,
-    pub svg: PathBuf,
+    /// None when there's no bench, only on-device evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub svg: Option<PathBuf>,
+    /// The imported on-device reports the markdown includes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub android: Vec<PathBuf>,
     pub text: String,
 }
 
@@ -159,8 +165,11 @@ fn enabled(s: &State) -> Vec<&Port> {
     s.ports.values().filter(|p| p.enabled).collect()
 }
 
-/// The report for the last bench `b`; `s` holds the ports and the scan that chose them.
-pub fn markdown(project: &str, b: &BenchResult, s: &State) -> String {
+const MADE_WITH: &str = "\n<sub>Made with [fast-anything](https://github.com/EL4CTEO/fast-anything)</sub>\n";
+
+/// The report for the last bench `b`; `s` holds the ports and the scan that chose them. On-device
+/// evidence gets its own section, and the host part is labelled as such.
+pub fn markdown(project: &str, b: &BenchResult, s: &State, on_device: &[Evidence]) -> String {
     // results saved before rounds and the A/A control have no verdict and no range
     let how = if b.verdict.is_some() {
         format!(
@@ -174,8 +183,9 @@ pub fn markdown(project: &str, b: &BenchResult, s: &State) -> String {
     };
     let (head, word) = headline(b.speedup);
     let scope = b.scope.as_ref().and_then(scope_line).map(|l| format!("{l}\n\n")).unwrap_or_default();
+    let host = if on_device.is_empty() { "" } else { "## Host scan and bench\n\n" };
     let mut md = format!(
-        "# ⚡ {project}: {head} {word}\n\n{scope}`{}` went from **{}** to **{}** ({how}).\n\n",
+        "# ⚡ {project}: {head} {word}\n\n{host}{scope}`{}` went from **{}** to **{}** ({how}).\n\n",
         b.command.join(" "),
         secs(b.before.median),
         secs(b.after.median),
@@ -199,8 +209,12 @@ pub fn markdown(project: &str, b: &BenchResult, s: &State) -> String {
             b.aa.median, b.aa.q1, b.aa.q3
         ));
     }
-    md.push_str("\n![fast-anything report](report.svg)\n\n| function | per call | checked against |\n|---|---|---|\n");
-    for p in enabled(s) {
+    let on = enabled(s);
+    md.push_str("\n![fast-anything report](report.svg)\n");
+    if !on.is_empty() {
+        md.push_str("\n| function | per call | checked against |\n|---|---|---|\n");
+    }
+    for p in &on {
         let v = p.verify.clone().unwrap_or_default();
         let per_call = v
             .micro
@@ -209,19 +223,50 @@ pub fn markdown(project: &str, b: &BenchResult, s: &State) -> String {
         md.push_str(&format!("| `{}` | {per_call} | {}/{} recorded real calls |\n", p.id, v.passed, v.total));
     }
     md.push_str(&scan_section(s, b));
-    md.push_str("\nThe original code stays in place: set `FAST_ANYTHING_DISABLE=1` to run it, or `fast-anything disable <id>` to remove the switch.\n\n<sub>Made with [fast-anything](https://github.com/EL4CTEO/fast-anything)</sub>\n");
+    if on.is_empty() {
+        // ports switched off after the bench: there's no switch to describe (#142)
+        let with =
+            if b.ports.is_empty() { String::new() } else { format!(", with {} switched on", b.ports.join(", ")) };
+        md.push_str(&format!("\nNo port is switched on now, so the app runs its original code: the numbers above are from the last bench{with}. `fast-anything enable <id>` switches a port back on.\n"));
+    } else {
+        md.push_str("\nThe original code stays in place: set `FAST_ANYTHING_DISABLE=1` to run it, or `fast-anything disable <id>` to remove the switch.\n");
+    }
+    if !on_device.is_empty() {
+        md.push_str(&android::markdown(on_device, true));
+    }
+    md.push_str(MADE_WITH);
     md
 }
 
-pub fn write(ctx: &Ctx) -> Result<ReportOut> {
-    let b = ctx.state.bench.as_ref().context("no benchmark yet: run  fast-anything bench")?;
+/// The report when there's on-device evidence but no host bench.
+fn on_device_only(project: &str, on_device: &[Evidence]) -> String {
+    format!("# ⚡ {project}: on-device evidence\n{}{MADE_WITH}", android::markdown(on_device, false))
+}
+
+/// `include_android`: fail when there's no on-device evidence (it's included whenever there is).
+pub fn write(ctx: &Ctx, include_android: bool) -> Result<ReportOut> {
+    let on_device = android::load(&ctx.fast)?;
+    ensure!(
+        !include_android || !on_device.is_empty(),
+        "no on-device evidence in .fast/android yet: run  fast-anything import gfxinfo --input gfxinfo.txt ...  first"
+    );
     let project = ctx.root.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "your app".into());
+    let md_path = ctx.fast.join("report.md");
+    let android: Vec<PathBuf> = on_device.iter().map(|e| e.path.clone()).collect();
+    let Some(b) = ctx.state.bench.as_ref() else {
+        if on_device.is_empty() {
+            bail!("no benchmark yet: run  fast-anything bench");
+        }
+        let text = on_device_only(&project, &on_device);
+        fs::write(&md_path, &text)?;
+        return Ok(ReportOut { markdown: md_path, svg: None, android, text });
+    };
     let ports = enabled(&ctx.state);
-    let text = markdown(&project, b, &ctx.state);
-    let (md_path, svg_path) = (ctx.fast.join("report.md"), ctx.fast.join("report.svg"));
+    let text = markdown(&project, b, &ctx.state, &on_device);
+    let svg_path = ctx.fast.join("report.svg");
     fs::write(&md_path, &text)?;
     fs::write(&svg_path, svg(&project, b, &ports))?;
-    Ok(ReportOut { markdown: md_path, svg: svg_path, text })
+    Ok(ReportOut { markdown: md_path, svg: Some(svg_path), android, text })
 }
 
 #[cfg(test)]
@@ -229,6 +274,58 @@ mod tests {
     use super::*;
     use crate::bench::{Spread, Stats};
     use crate::state::Verify;
+
+    #[test]
+    fn on_device_evidence_gets_its_own_section() {
+        let doc = crate::android::validate(serde_json::json!({
+            "schema_version": 1, "source": "android-gfxinfo", "measured_on": "ART",
+            "device": { "serial": "DM9X8", "android_version": "14", "abi": "arm64-v8a" },
+            "build": { "package": "com.example.app", "variant": "debug" },
+            "thermal": { "status": 0 },
+            "samples": { "frames": 412, "janky_frames": 91, "janky_percent": 22.09, "p90_ms": 22 },
+            "provenance": { "input": "gfxinfo.txt", "input_sha256": "ab".repeat(32) }
+        }))
+        .unwrap();
+        let evidence = [Evidence { path: ".fast/android/gfxinfo/report.json".into(), doc }];
+        let b = BenchResult {
+            before: Stats { median: 4.0, ..Stats::default() },
+            after: Stats { median: 0.5, ..Stats::default() },
+            speedup: 8.0,
+            ..BenchResult::default()
+        };
+        let md = markdown("app", &b, &State::default(), &evidence);
+        assert!(md.starts_with("# ⚡ app: 8.0× faster\n\n## Host scan and bench\n\n"), "{md}");
+        let device = &md[md.find("## On-device (ART)").expect("an on-device section")..];
+        assert!(device.contains("no speed-up is computed across the two"), "{device}");
+        assert!(!device.contains('×') && !device.contains("faster"), "no speed-up across host and ART: {device}");
+        for part in [
+            "measured on ART: DM9X8, Android 14, arm64-v8a",
+            "thermal status at capture: 0 (none)",
+            "**22.09%** janky (91)",
+            "p90 22ms",
+            "sha256 `abab",
+        ] {
+            assert!(device.contains(part), "{part}\n{device}");
+        }
+        assert!(md.ends_with(MADE_WITH));
+        assert!(!markdown("app", &b, &State::default(), &[]).contains("On-device"));
+        let alone = on_device_only("app", &evidence);
+        assert!(
+            alone.starts_with("# ⚡ app: on-device evidence\n\n## On-device (ART)") && !alone.contains("Host"),
+            "{alone}"
+        );
+    }
+
+    #[test]
+    fn a_report_without_enabled_ports_says_so() {
+        let b = BenchResult { speedup: 8.0, ports: vec!["fuzzy.lev".into()], ..BenchResult::default() };
+        let md = markdown("app", &b, &State::default(), &[]);
+        assert!(
+            md.contains("No port is switched on now, so the app runs its original code: the numbers above are from the last bench, with fuzzy.lev switched on."),
+            "{md}"
+        );
+        assert!(!md.contains("FAST_ANYTHING_DISABLE") && !md.contains("| function | per call"), "{md}");
+    }
 
     #[test]
     fn svg_is_escaped_and_scaled() {
@@ -252,7 +349,7 @@ mod tests {
             speedup: 8.42 / 9.27,
             ..BenchResult::default()
         };
-        let (md, card) = (markdown("app", &b, &State::default()), svg("app", &b, &[]));
+        let (md, card) = (markdown("app", &b, &State::default(), &[]), svg("app", &b, &[]));
         assert!(md.starts_with("# ⚡ app: 1.1× slower"), "{md}");
         assert!(card.contains(">slower</tspan>") && !card.contains("faster"), "{card}");
     }
@@ -274,7 +371,7 @@ mod tests {
             cpu_speedup: Some(95.2),
             ..BenchResult::default()
         };
-        let md = markdown("demo", &b, &State::default());
+        let md = markdown("demo", &b, &State::default(), &[]);
         assert!(md.contains("median of 5 rounds") && md.contains("228–240×"), "{md}");
         assert!(md.contains("- CPU time 95×: **11.90s** → **125ms**"), "{md}");
         assert!(
@@ -285,7 +382,7 @@ mod tests {
         assert!(card.contains("234×") && card.contains("CPU time 95×"));
 
         let old = BenchResult { speedup: 8.0, ..BenchResult::default() };
-        let md = markdown("demo", &old, &State::default());
+        let md = markdown("demo", &old, &State::default(), &[]);
         assert!(!md.contains("CPU time") && !md.contains("A/A") && md.contains("interleaved"), "{md}");
     }
 
@@ -299,7 +396,7 @@ mod tests {
             cpu: Some("AMD Ryzen 5 PRO 4650GE".into()),
         };
         let b = BenchResult { speedup: 8.0, scope: Some(scope.clone()), ..BenchResult::default() };
-        let md = markdown("app", &b, &State::default());
+        let md = markdown("app", &b, &State::default(), &[]);
         assert!(
             md.starts_with(
                 "# ⚡ app: 8.0× faster\n\nMeasured 2026-11-26 on AMD Ryzen 5 PRO 4650GE (12 logical CPUs), Linux x86_64.\n\n`"
@@ -314,7 +411,7 @@ mod tests {
         let old: BenchResult =
             serde_json::from_str(r#"{"runs": 5, "before": {"median": 4.0}, "speedup": 8.0}"#).unwrap();
         assert!(old.scope.is_none());
-        let md = markdown("app", &old, &State::default());
+        let md = markdown("app", &old, &State::default(), &[]);
         assert!(md.starts_with("# ⚡ app: 8.0× faster\n\n`") && !md.contains("Measured"), "{md}");
     }
 
@@ -373,7 +470,7 @@ mod tests {
             speedup: 8.0,
             ..BenchResult::default()
         };
-        let md = markdown("app", &b, &s);
+        let md = markdown("app", &b, &s, &[]);
         let (table, section, stays) = (
             md.find("| `fuzzy.lev` | **30×**").unwrap(),
             md.find("## How the ports were chosen").unwrap(),
@@ -399,11 +496,11 @@ mod tests {
         assert!(md.contains("2 more functions from the scan ranked lower."), "{md}");
 
         let stopped_early = State { wall: 2.0, ..s.clone() };
-        let md = markdown("app", &b, &stopped_early);
+        let md = markdown("app", &b, &stopped_early, &[]);
         assert!(md.contains("less than the original's **4.00s** median above") && !md.contains("as long"), "{md}");
 
         let no_scan = State { hotspots: vec![], ..s };
-        let md = markdown("app", &b, &no_scan);
+        let md = markdown("app", &b, &no_scan, &[]);
         assert!(!md.contains("How the ports were chosen") && md.contains("| `fuzzy.lev` |"), "{md}");
     }
 }

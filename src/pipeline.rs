@@ -61,13 +61,35 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
     }
     let profile = lang.profile(&ctx, &exe, &command[1..], duration).map_err(explain)?;
     let hotspots = hotspot::rank(profile.functions, profile.wall);
+    let mut notes = profile.notes;
+    notes.extend(attribution_notes(&hotspots));
     ctx.state.lang = lang;
     ctx.state.runtime = Some(exe);
     ctx.state.base = profile.base;
     ctx.state.wall = profile.wall;
     ctx.state.hotspots = hotspots.clone();
     ctx.save()?;
-    Ok(ScanOut { command, wall: profile.wall, hotspots, notes: profile.notes })
+    Ok(ScanOut { command, wall: profile.wall, hotspots, notes })
+}
+
+/// What the ranking can't show by itself: no call counts from a sampling profiler, and a run that
+/// mostly happens outside the app's own functions (#142).
+fn attribution_notes(hotspots: &[Hotspot]) -> Vec<String> {
+    let mut notes = Vec::new();
+    if hotspots.is_empty() {
+        return notes;
+    }
+    if hotspots.iter().all(|h| h.ncalls == 0) {
+        notes.push("this profiler samples the stack instead of counting calls, so there are no call counts".into());
+    }
+    let top = hotspots.iter().map(|h| h.share).fold(0.0, f64::max);
+    if top < 0.5 {
+        notes.push(format!(
+            "your biggest function takes only {:.0}% of the run: the rest is outside your functions (top-level code, the runtime, libraries, startup), which a port can't speed up",
+            top * 100.0
+        ));
+    }
+    notes
 }
 
 /// What an env runner (uv, poetry, ...) prints for a command run in the project.
@@ -403,8 +425,8 @@ pub fn bench(root: &Path, runs: usize) -> Result<BenchResult> {
     Ok(result)
 }
 
-pub fn report(root: &Path) -> Result<ReportOut> {
-    report::write(&Ctx::open(root)?)
+pub fn report(root: &Path, include_android: bool) -> Result<ReportOut> {
+    report::write(&Ctx::open(root)?, include_android)
 }
 
 /// What the agent gets told after a failed attempt, or a right one that's slower than the original.
@@ -598,7 +620,7 @@ pub fn go(
     }
     ensure!(enabled > 0, "no port both passed verification and ran faster");
     show::bench(&bench(root, runs)?);
-    show::report(&report(root)?);
+    show::report(&report(root, false)?);
     Ok(())
 }
 
@@ -606,6 +628,18 @@ pub fn go(
 mod tests {
     use super::*;
     use crate::state::Micro;
+
+    #[test]
+    fn scan_notes_say_what_the_ranking_cant() {
+        let h = |share: f64, ncalls: u64| Hotspot { share, ncalls, ..Hotspot::default() };
+        assert!(attribution_notes(&[]).is_empty());
+        assert!(attribution_notes(&[h(0.99, 1), h(0.6, 1_000)]).is_empty(), "cProfile counts calls");
+        let sampled = attribution_notes(&[h(0.84, 0), h(0.83, 0)]);
+        assert_eq!(sampled.len(), 1);
+        assert!(sampled[0].contains("no call counts"), "{sampled:?}");
+        let low = attribution_notes(&[h(0.203, 0), h(0.1, 0)]);
+        assert!(low.len() == 2 && low[1].starts_with("your biggest function takes only 20% of the run"), "{low:?}");
+    }
 
     #[test]
     fn slow_but_right_gets_asked_for_speed() {

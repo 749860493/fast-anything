@@ -48,6 +48,7 @@ Or step by step:
 | `enable` / `disable` | swaps the Rust in or out (one marked block, removed byte for byte) |
 | `bench` | times the whole app in rotated rounds of original, original again (an A/A control for noise) and Rust, plus one warm-up per side (`--runs 5` = 11 original runs, 6 Rust runs); wall and CPU time |
 | `report` | markdown + SVG card for your PR |
+| `import gfxinfo` / `perfetto` / `simpleperf` / `json` | keeps evidence measured on an Android device (ART) with its metadata and SHA-256; `report` shows it in its own section, never as a speed-up against the host numbers |
 | `doctor` | checks Rust, your runtimes and your agents |
 
 `--agent` takes `claude`, `codex`, or any command that reads a prompt on stdin. Without it, hand `TASK.md` to whatever you use.
