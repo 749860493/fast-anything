@@ -3095,11 +3095,9 @@ assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALU
         assert_eq!(notes.len(), 1, "expected low-attribution note, got {notes:?}");
         let note = notes[0].as_str().unwrap();
         assert!(
-            note.contains("only 20.0% of the profiled run landed in your own named functions")
-                && note.contains("node:vm 50%")
+            note.starts_with("only 20.0% of the run is in your own named functions; the rest went to node:vm 50%")
                 && note.contains("fast-glob 20%")
-                && note.contains("top-level / anonymous code 10%")
-                && note.contains("V8's sampling profiler doesn't count calls"),
+                && note.contains("top-level / anonymous code 10%"),
             "unexpected note: {note}"
         );
 

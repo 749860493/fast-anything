@@ -983,10 +983,10 @@ function profile(job) {
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, 3)
       .map(([l, us]) => `${l} ${Math.round((us / 1e6 / denom) * 100)}%`);
-    const where = top.length ? ` (the rest went to ${top.join(", ")})` : "";
-    notes.push(
-      `only ${(share * 100).toFixed(1)}% of the profiled run landed in your own named functions${where}; V8's sampling profiler doesn't count calls`,
-    );
+    // the scan's own notes already say there are no call counts and that most of the run is
+    // outside the app's functions; this one says where it went instead (#164)
+    if (top.length)
+      notes.push(`only ${(share * 100).toFixed(1)}% of the run is in your own named functions; the rest went to ${top.join(", ")}`);
   }
   writeFileSync(job.out, JSON.stringify({ wall: total, base: ".", functions, notes }));
 }
