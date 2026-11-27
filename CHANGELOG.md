@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.11
+
+- `import gfxinfo`, `json`, `perfetto`, `simpleperf`: keeps evidence measured on an Android device with its device and build metadata and a SHA-256 of the raw input. The report shows it in its own "On-device (ART)" section and never as a speed-up against the host numbers; Perfetto and simpleperf files are stored, not parsed (#143).
+- `doctor`: a JDK found through `JAVA_HOME` that is older than 22 shows as too old instead of not found; `adb` is listed as not used (#136).
+- `scan`: notes when the profiler has no call counts, and when most of the run is outside the app's functions (#142).
+- `report`: says when no port is switched on any more (#142).
+
+Thanks @JuggyBob.
+
 ## 0.8.10
 
 - `scan` and the report show a function's own time next to its total, callees included (#163, #142).
