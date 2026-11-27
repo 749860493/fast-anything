@@ -46,6 +46,33 @@ pub fn is_java(program: &str) -> bool {
     runner(program).is_some()
 }
 
+/// A module of an Android app or library under `root`, relative to it: one with
+/// src/main/AndroidManifest.xml, or whose build applies the Android Gradle plugin. Those run on
+/// ART, which can't be profiled here (#136).
+pub(crate) fn android_module(root: &Path) -> Option<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let plugin = ["build.gradle.kts", "build.gradle"].iter().any(|f| {
+            fs::read_to_string(dir.join(f))
+                .is_ok_and(|t| t.contains("com.android.application") || t.contains("com.android.library"))
+        });
+        if plugin || dir.join("src").join("main").join("AndroidManifest.xml").is_file() {
+            return Some(dir.strip_prefix(root).unwrap_or(&dir).to_path_buf());
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir()
+                && !name.starts_with('.')
+                && !["target", "build", "out", "node_modules", "src"].contains(&name.as_str())
+            {
+                stack.push(e.path());
+            }
+        }
+    }
+    None
+}
+
 /// The program as given, or its .cmd / .bat twin on Windows (mvn, gradlew).
 fn build_tool(program: &str, root: &Path) -> Result<String> {
     let base = if program.contains(['/', '\\']) { root.join(program) } else { PathBuf::from(program) };
@@ -615,6 +642,25 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_an_android_module() {
+        let root = std::env::temp_dir().join(format!("fa-java-android-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("desktop/src/main/kotlin")).unwrap();
+        fs::write(root.join("desktop/build.gradle.kts"), "plugins { kotlin(\"jvm\") }\n").unwrap();
+        assert_eq!(android_module(&root), None);
+
+        fs::create_dir_all(root.join("app/src/main")).unwrap();
+        fs::write(root.join("app/src/main/AndroidManifest.xml"), "<manifest/>\n").unwrap();
+        assert_eq!(android_module(&root), Some(PathBuf::from("app")));
+        fs::remove_file(root.join("app/src/main/AndroidManifest.xml")).unwrap();
+        assert_eq!(android_module(&root), None);
+
+        fs::write(root.join("app/build.gradle"), "plugins { id 'com.android.application' }\n").unwrap();
+        assert_eq!(android_module(&root), Some(PathBuf::from("app")));
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn the_recorder_adds_edge_cases() {

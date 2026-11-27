@@ -39,13 +39,27 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
         ensure!(lang.stops_after_duration(), "--duration stops R apps with SIGINT, which Windows doesn't have");
         ensure!(d.is_finite() && d > 0.0, "--duration takes a number of seconds, e.g. --duration 30");
     }
-    let exe = lang.resolve(&command[0], &command[1..], &ctx.root)?;
+    // a failed scan of an Android project says why: its app runs on ART, not on a JVM (#136)
+    let android = (crate::java::runner(&command[0]) == Some(crate::java::Runner::Gradle))
+        .then(|| crate::java::android_module(&ctx.root))
+        .flatten();
+    let explain = |e: anyhow::Error| match &android {
+        Some(module) => {
+            let module =
+                if module.as_os_str().is_empty() { "this project".into() } else { module.display().to_string() };
+            e.context(format!(
+                "{module} is an Android module, and Android apps run on ART, which fast-anything can't profile: it scans Java and Kotlin on a desktop JVM"
+            ))
+        }
+        None => e,
+    };
+    let exe = lang.resolve(&command[0], &command[1..], &ctx.root).map_err(explain)?;
     ctx.state.command = command.clone();
     ui::step(format!("profiling {}", ui::bold(command.join(" "))));
     if let Some(d) = duration.filter(|_| lang != Lang::CSharp) {
         ui::line(format!("  stopping it after {d}s"));
     }
-    let profile = lang.profile(&ctx, &exe, &command[1..], duration)?;
+    let profile = lang.profile(&ctx, &exe, &command[1..], duration).map_err(explain)?;
     let hotspots = hotspot::rank(profile.functions, profile.wall);
     ctx.state.lang = lang;
     ctx.state.runtime = Some(exe);
