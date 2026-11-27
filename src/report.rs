@@ -209,8 +209,12 @@ pub fn markdown(project: &str, b: &BenchResult, s: &State, on_device: &[Evidence
             b.aa.median, b.aa.q1, b.aa.q3
         ));
     }
-    md.push_str("\n![fast-anything report](report.svg)\n\n| function | per call | checked against |\n|---|---|---|\n");
-    for p in enabled(s) {
+    let on = enabled(s);
+    md.push_str("\n![fast-anything report](report.svg)\n");
+    if !on.is_empty() {
+        md.push_str("\n| function | per call | checked against |\n|---|---|---|\n");
+    }
+    for p in &on {
         let v = p.verify.clone().unwrap_or_default();
         let per_call = v
             .micro
@@ -219,7 +223,14 @@ pub fn markdown(project: &str, b: &BenchResult, s: &State, on_device: &[Evidence
         md.push_str(&format!("| `{}` | {per_call} | {}/{} recorded real calls |\n", p.id, v.passed, v.total));
     }
     md.push_str(&scan_section(s, b));
-    md.push_str("\nThe original code stays in place: set `FAST_ANYTHING_DISABLE=1` to run it, or `fast-anything disable <id>` to remove the switch.\n");
+    if on.is_empty() {
+        // ports switched off after the bench: there's no switch to describe (#142)
+        let with =
+            if b.ports.is_empty() { String::new() } else { format!(", with {} switched on", b.ports.join(", ")) };
+        md.push_str(&format!("\nNo port is switched on now, so the app runs its original code: the numbers above are from the last bench{with}. `fast-anything enable <id>` switches a port back on.\n"));
+    } else {
+        md.push_str("\nThe original code stays in place: set `FAST_ANYTHING_DISABLE=1` to run it, or `fast-anything disable <id>` to remove the switch.\n");
+    }
     if !on_device.is_empty() {
         md.push_str(&android::markdown(on_device, true));
     }
@@ -303,6 +314,17 @@ mod tests {
             alone.starts_with("# ⚡ app: on-device evidence\n\n## On-device (ART)") && !alone.contains("Host"),
             "{alone}"
         );
+    }
+
+    #[test]
+    fn a_report_without_enabled_ports_says_so() {
+        let b = BenchResult { speedup: 8.0, ports: vec!["fuzzy.lev".into()], ..BenchResult::default() };
+        let md = markdown("app", &b, &State::default(), &[]);
+        assert!(
+            md.contains("No port is switched on now, so the app runs its original code: the numbers above are from the last bench, with fuzzy.lev switched on."),
+            "{md}"
+        );
+        assert!(!md.contains("FAST_ANYTHING_DISABLE") && !md.contains("| function | per call"), "{md}");
     }
 
     #[test]
