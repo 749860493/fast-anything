@@ -35,8 +35,10 @@ Ports are compiled with your Rust toolchain ([rustup](https://rustup.rs)).
 ## Use
 
 ```sh
-fast-anything go --agent claude -- python app.py     # or: -- node app.ts / bun app.ts / deno run -A app.ts / ruby app.rb / java App.java / mvn exec:java / gradle run / go run . / php app.php / clang -O2 main.c / Rscript app.R
+fast-anything go --agent claude -- python app.py
 ```
+
+After `--` goes whatever starts your app: `node app.ts`, `ruby app.rb`, `java App.java`, `gradle run`, `go run .`, `php app.php`, `clang -O2 main.c`, `dotnet run -c Release`, `Rscript app.R`.
 
 Or step by step:
 
@@ -46,9 +48,9 @@ Or step by step:
 | `port [id]` | records up to 500 real calls, creates a one-function Rust crate + `TASK.md` |
 | `verify` | release-builds the port and replays every recorded call |
 | `enable` / `disable` | swaps the Rust in or out (one marked block, removed byte for byte) |
-| `bench` | times the whole app in rotated rounds of original, original again (an A/A control for noise) and Rust, plus one warm-up per side (`--runs 5` = 11 original runs, 6 Rust runs); wall and CPU time |
+| `bench` | times the whole app, original against Rust, with an A/A control for noise; wall and CPU time |
 | `report` | markdown + SVG card for your PR |
-| `import gfxinfo` / `perfetto` / `simpleperf` / `json` | keeps evidence measured on an Android device (ART) with its metadata and SHA-256; `report` shows it in its own section, never as a speed-up against the host numbers |
+| `import` | attaches measurements from an Android device; the report keeps them apart from the host numbers |
 | `doctor` | checks Rust, your runtimes and your agents |
 
 `--agent` takes `claude`, `codex`, or any command that reads a prompt on stdin. Without it, hand `TASK.md` to whatever you use.
@@ -57,9 +59,15 @@ Or step by step:
 
 <p align="center"><img src="https://raw.githubusercontent.com/EL4CTEO/fast-anything/main/docs/assets/verify.gif" alt="verify catches a wrong port" width="820"></p>
 
-That port looked right but compared bytes instead of characters. 148 of 500 real calls caught it. On top of the recorded calls, fast-anything derives extra cases and lets the original answer them: edge cases (NaN, ±infinity, -0.0, zero and ±1, non-ASCII text, empty and up to 16× bigger inputs) and shrunk inputs (tiny and random slices). Nothing is enabled until every case matches: same values (floats within 1e-9 of their size or of the largest value in the same list, -0.0 not 0.0), errors where the original errors. A port that is right but slower per call than the original (calling into Rust costs more than the work saved) isn't enabled either, nor is one whose original takes about as long as a clock read (where each call is timed on its own: C, C++, Go, Java, Kotlin, PHP, C#), since the per-call times can't show a saving there. `FAST_ANYTHING_DISABLE=1` runs the original any time.
+That port looked right but compared bytes instead of characters. 148 of 500 real calls caught it.
 
-Every 5th recorded call (from 5 calls up) is held out of the crate folder the agent works in: verify replays it too but reports a mismatch there without the values, so a port that special-cases the calls it was shown still fails. verify deletes its working copy of those calls when it's done. It's a guard against a port fitted to the calls it was shown, not a sandbox: an agent that goes looking can still read them in `.fast/holdout`.
+Nothing is enabled until every case matches:
+
+- **Recorded calls**: up to 500 real calls from your app.
+- **Derived cases**, answered by the original: edge values (NaN, ±infinity, -0.0, non-ASCII text, empty and up to 16× bigger inputs) and shrunk inputs.
+- **Held-out calls**: every 5th recorded call stays out of the folder the agent works in, so a port fitted to the calls it was shown still fails. It's a guard, not a sandbox: an agent that goes looking can read them in `.fast/holdout`.
+
+Floats must match within 1e-9 of their size (or of the largest value in their list), -0.0 isn't 0.0, and errors must come where the original errors. A port that is right but slower per call isn't enabled either, nor one whose original is too cheap to time per call (C, C++, Go, Java, Kotlin, PHP, C#). `FAST_ANYTHING_DISABLE=1` runs the original any time.
 
 ## Results
 
@@ -99,24 +107,31 @@ Or wire it up by hand:
 
 ## Languages
 
-| language | binding | status |
+| language | run it with | bridge |
 |---|---|---|
-| Python 3.10+ | PyO3; servers and GUIs: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
-| JavaScript / TypeScript (Node 22+, Bun, Deno 2+: `bun app.ts`, `deno run -A app.ts`) | napi-rs; servers: `scan --duration 30` (ends them with `process.exit`) | ✅ |
-| Ruby 3.3+ | C ABI + JSON, through Ruby's built-in Fiddle; servers: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
-| Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API; servers: `scan --duration 30` | ✅ |
-| Kotlin/JVM (Gradle, `src/main/kotlin`, JDK 22+) | the Java bridge; top-level functions, `object` and companion members, extension functions | ✅ |
-| Go 1.22+ (`go run .`) | the same C bridge, through the Windows loader or dlopen (cgo); servers: `scan --duration 30` | ✅ |
-| PHP 8.1+ (`php app.php`) | the same C bridge, through PHP's FFI extension (`extension=ffi`); servers: `scan --duration 30` (with `pcntl`) | ✅ |
-| C and C++ (gcc, clang or Intel oneAPI icx/icpx: `clang -O2 main.c lib.c`) | the same C bridge (C passes its arguments as they are, no JSON), through LoadLibrary or dlopen; servers: `scan --duration 30` | ✅ |
-| C# / .NET 8+ (`dotnet run -c Release`) | the same C bridge, through NativeLibrary; profiled with EventPipe, nothing to install; GUIs and servers: `scan --duration 30` | ✅ |
-| R 4.0+ (`Rscript app.R`) | the same C bridge, through base R's `.C()`; profiled with Rprof, no packages or R headers needed; servers: `scan --duration 30` | ✅ |
+| Python 3.10+ | `python app.py` | PyO3 |
+| JavaScript / TypeScript (Node 22+, Bun, Deno 2+) | `node app.ts`, `bun app.ts`, `deno run -A app.ts` | napi-rs |
+| Ruby 3.3+ | `ruby app.rb` | C bridge, through Fiddle |
+| Java 22+ | `java App.java`, Maven, Gradle | C bridge, through the FFM API |
+| Kotlin/JVM (JDK 22+) | Gradle, sources in `src/main/kotlin` | the Java bridge |
+| Go 1.22+ | `go run .` | C bridge, through the Windows loader or dlopen (cgo) |
+| PHP 8.1+ | `php app.php` | C bridge, through FFI (`extension=ffi`) |
+| C and C++ (gcc, clang, Intel icx/icpx) | `clang -O2 main.c lib.c` | C bridge; C passes its arguments as they are, no JSON |
+| C# / .NET 8+ | `dotnet run -c Release` | C bridge, through NativeLibrary |
+| R 4.0+ | `Rscript app.R` | C bridge, through base R's `.C()` |
 
-It ports top-level, deterministic functions that take plain data (numbers, strings, lists, dicts, typed arrays…), including ones in your entry script when its main code sits under `if __name__ == "__main__":` (or `if __FILE__ == $0`, or `if (import.meta.main)` / `if (require.main === module)`). In Python that means module-level functions, `@staticmethod`s and `@classmethod`s that don't use `cls` (dataclasses, NamedTuples and numeric NumPy arrays count as plain data), in Java, C# and PHP static methods (and PHP functions), in Go plain functions, in C and C++ free functions and static methods. `scan` says why anything else can't move yet.
+Servers and GUIs that don't exit: `scan --duration 30` stops the app after 30 seconds and ranks what ran (PHP needs `pcntl`; R: not on Windows).
 
-With Intel oneAPI on Windows, run fast-anything from a shell where `setvars.bat` ran (it sets up the linker). SYCL kernels run on the device and aren't ported; with `-fsycl`, only host functions are profiled and ported.
+It ports top-level, deterministic functions that take plain data (numbers, strings, lists, dicts, typed arrays). `scan` says why anything else can't move yet.
 
-Ruby, Java, Go, PHP, C, C++, C# and R need no headers, bindings or extra tools: the port is a plain Rust library with one C entry point taking and returning JSON, and fast-anything replays the recorded calls against it directly. Any language that can call C can use that bridge. A C port also has a typed entry point that takes the function's own arguments and returns its result, NaN and infinity included; the C app calls that one, and verify replays and times it.
+- **Python**: module-level functions, `@staticmethod`s, and `@classmethod`s that don't use `cls`. Dataclasses, NamedTuples and numeric NumPy arrays count as plain data.
+- **Java, C#, PHP**: static methods (and PHP functions). **Kotlin**: top-level functions, `object` and companion members, extension functions.
+- **Go**: plain functions. **C and C++**: free functions and static methods.
+- **Entry scripts**: their functions count when the main code sits under `if __name__ == "__main__":` or its equivalent (`if __FILE__ == $0`, `import.meta.main`, `require.main === module`).
+
+Outside Python and Node, a port is a plain Rust library with one C entry point taking and returning JSON: no headers, bindings or extra tools, and any language that can call C can use it.
+
+Intel oneAPI on Windows: run fast-anything from a shell where `setvars.bat` ran. SYCL kernels aren't ported; with `-fsycl`, only host functions are.
 
 ## Sponsors
 
