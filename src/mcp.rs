@@ -121,7 +121,7 @@ fn call(params: &Value) -> Result<Value> {
         "fast_report" => serde_json::to_value(pipeline::report(&root, false)?)?,
         "fast_status" => {
             let ctx = state::Ctx::open(&root)?;
-            json!({ "command": ctx.state.command, "ports": ctx.state.ports, "bench": ctx.state.bench })
+            crate::show::status_json(&ctx)
         }
         other => anyhow::bail!("unknown tool {other}"),
     })
@@ -216,6 +216,21 @@ mod tests {
         assert!(handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
         let bad = handle(&json!({ "jsonrpc": "2.0", "id": 3, "method": "nope" })).unwrap();
         assert_eq!(bad["error"]["code"], -32601);
+
+        let dir = std::env::temp_dir().join(format!("fa-mcp-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".fast")).unwrap();
+        std::fs::write(
+            dir.join(".fast/state.json"),
+            r#"{"version": 1, "command": ["python", "app.py"], "lang": "python", "wall": 4.0, "unprofiled": 1.0}"#,
+        )
+        .unwrap();
+        let status = call(&json!({ "name": "fast_status", "arguments": { "path": dir } })).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            (&status["lang"], &status["wall_seconds"], &status["unprofiled_seconds"]),
+            (&json!("python"), &json!(4.0), &json!(1.0))
+        );
     }
 
     #[test]

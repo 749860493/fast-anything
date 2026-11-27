@@ -129,16 +129,18 @@ fn scan_section(s: &State, b: &BenchResult) -> String {
         s.command.join(" "),
         secs(s.wall)
     );
-    let (wall, original) = (s.wall, b.before.median);
+    let (wall, original) = (s.wall, s.unprofiled.filter(|&u| u > 0.0).unwrap_or(b.before.median));
+    let baseline =
+        if s.unprofiled.is_some_and(|u| u > 0.0) { "when calibrated" } else { "the original's median above" };
     if wall > 0.0 && original > 0.0 {
         md.push_str(&if wall >= original {
             format!(
-                " against **{}** without it (the original's median above): profiling made it run {} as long",
+                " against **{}** without it ({baseline}): profiling made it run {} as long",
                 secs(original),
                 times(wall / original)
             )
         } else {
-            format!(", less than the original's **{}** median above: the scan was likely stopped early", secs(original))
+            format!(", less than the **{}** without it ({baseline}): the scan was likely stopped early", secs(original))
         });
     }
     md.push_str(
@@ -497,7 +499,17 @@ mod tests {
 
         let stopped_early = State { wall: 2.0, ..s.clone() };
         let md = markdown("app", &b, &stopped_early, &[]);
-        assert!(md.contains("less than the original's **4.00s** median above") && !md.contains("as long"), "{md}");
+        assert!(
+            md.contains("less than the **4.00s** without it (the original's median above)") && !md.contains("as long"),
+            "{md}"
+        );
+
+        let calibrated = State { unprofiled: Some(3.1), ..s.clone() };
+        let md = markdown("app", &b, &calibrated, &[]);
+        assert!(
+            md.contains("`python app.py`, which took **12.40s** under the profiler against **3.10s** without it (when calibrated): profiling made it run 4.0× as long."),
+            "{md}"
+        );
 
         let no_scan = State { hotspots: vec![], ..s };
         let md = markdown("app", &b, &no_scan, &[]);
