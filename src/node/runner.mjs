@@ -887,6 +887,31 @@ function projectRelative(root, file) {
 
 // ------------------------------------------------------------------ profile
 
+function bucketLabel(frame, root) {
+  const { url, functionName } = frame;
+  if (!url) {
+    if (functionName === "(idle)" || functionName === "(program)" || functionName === "(root)") return null;
+    if (functionName === "(garbage collector)") return "garbage collection";
+    return "V8 / native";
+  }
+  if (url.startsWith("node:") || url.startsWith("ext:") || url.startsWith("bun:")) {
+    return url.split("/")[0];
+  }
+  if (url.startsWith("file:")) {
+    try {
+      const file = fileURLToPath(url);
+      const rel = path.relative(root, file).split(path.sep);
+      const nm = rel.indexOf("node_modules");
+      if (nm >= 0 && nm + 1 < rel.length) {
+        const pkg = rel[nm + 1];
+        return pkg.startsWith("@") && nm + 2 < rel.length ? `${pkg}/${rel[nm + 2]}` : pkg;
+      }
+      if (!functionName) return "top-level / anonymous code";
+    } catch {}
+  }
+  return null;
+}
+
 function profile(job) {
   const names = readdirSync(job.dir).filter((f) => f.endsWith(".cpuprofile"));
   if (!names.length) throw new Error("the runtime wrote no .cpuprofile (Bun and Deno need a version with --cpu-prof)");
@@ -894,7 +919,9 @@ function profile(job) {
   // the longest one, the main thread's.
   const key = (n) => `${n.callFrame.url}:${n.callFrame.lineNumber}:${n.callFrame.columnNumber}:${n.callFrame.functionName}`;
   const funcs = new Map();
+  const outside = new Map();
   let total = 0;
+  let activeUs = 0;
   for (const name of names) {
     const prof = JSON.parse(readFileSync(path.join(job.dir, name), "utf8"));
     total = Math.max(total, (prof.endTime - prof.startTime) / 1e6);
@@ -906,7 +933,20 @@ function profile(job) {
     for (const n of prof.nodes) if (!funcs.has(key(n))) funcs.set(key(n), { frame: n.callFrame, self: 0, cum: 0 });
     for (const [id, us] of selfUs) {
       let node = byId.get(id);
+      if (!node || us <= 0) continue;
+      const fnName = node.callFrame.functionName;
+      if (fnName !== "(idle)" && fnName !== "(root)") activeUs += us;
       funcs.get(key(node)).self += us;
+      const { url, functionName } = node.callFrame;
+      const inProject =
+        functionName &&
+        url &&
+        url.startsWith("file:") &&
+        projectRelative(job.root, fileURLToPath(url)) !== null;
+      if (!inProject) {
+        const label = bucketLabel(node.callFrame, job.root);
+        if (label) outside.set(label, (outside.get(label) || 0) + us);
+      }
       const seen = new Set();
       while (node) {
         const k = key(node);
@@ -934,7 +974,21 @@ function profile(job) {
     if (info)
       functions.push({ ...info, file: r.rel.split(path.sep).join("/"), line: r.line0 + 1, name: r.name, ncalls: 0, tottime: r.self, cumtime: r.cum });
   }
-  writeFileSync(job.out, JSON.stringify({ wall: total, base: ".", functions }));
+  const notes = [];
+  const attributedSelf = functions.reduce((a, f) => a + f.tottime, 0);
+  const denom = Math.max(total, activeUs / 1e6);
+  const share = denom > 0 ? Math.min(1, attributedSelf / denom) : 0;
+  if (denom > 0 && share < 0.5) {
+    const top = [...outside.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 3)
+      .map(([l, us]) => `${l} ${Math.round((us / 1e6 / denom) * 100)}%`);
+    const where = top.length ? ` (the rest went to ${top.join(", ")})` : "";
+    notes.push(
+      `only ${(share * 100).toFixed(1)}% of the profiled run landed in your own named functions${where}; V8's sampling profiler doesn't count calls`,
+    );
+  }
+  writeFileSync(job.out, JSON.stringify({ wall: total, base: ".", functions, notes }));
 }
 
 // ------------------------------------------------------------------ verify
