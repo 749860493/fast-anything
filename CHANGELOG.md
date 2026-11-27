@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+- `scan --android <package>`: ranks an Android app's own methods on a device with adb + simpleperf, with device and build metadata; the report shows it as on-device (ART) evidence (#136).
+- `scan --explain`: says what a scan would profile (language, runtime, Android modules and their layout) without running the app (#136).
+- `scan --calibrate`: times the app without the profiler and shows the profiler's overhead (#142).
+- `scan` keeps what the app printed in `.fast/app.log` (#142).
+- Node: a low-attribution scan says where the rest of the run went (#164).
+- README rewritten; demo GIFs show the current output.
+
+Thanks @JuggyBob and @brixtonpham.
+
 ## 0.8.11
 
 - `import gfxinfo`, `json`, `perfetto`, `simpleperf`: keeps evidence measured on an Android device with its device and build metadata and a SHA-256 of the raw input. The report shows it in its own "On-device (ART)" section and never as a speed-up against the host numbers; Perfetto and simpleperf files are stored, not parsed (#143).
