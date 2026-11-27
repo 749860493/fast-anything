@@ -3044,4 +3044,78 @@ assert.ok(!same([Number.MAX_VALUE, Infinity], [Number.MAX_VALUE, Number.MAX_VALU
             .unwrap_or_else(|| panic!("missing hotspot scoreDoc; got {:?}", scanned.hotspots));
         assert!(h.portable() && h.blockers.is_empty(), "scoreDoc should be portable, got {:?}", h.blockers);
     }
+
+    #[test]
+    fn profile_warns_when_most_samples_land_outside_named_project_functions() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-node-low-attr-{}", std::process::id()));
+        let prof = dir.join("cpuprof");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&prof).unwrap();
+        let app_file = dir.join("app.mjs");
+        fs::write(&app_file, "export function work(x) {\n  return x + 1;\n}\n").unwrap();
+        let pkg_file = dir.join("node_modules/fast-glob/index.js");
+        fs::create_dir_all(pkg_file.parent().unwrap()).unwrap();
+        fs::write(&pkg_file, "module.exports = {};\n").unwrap();
+
+        let file_url = |p: &Path| {
+            let s = p.to_string_lossy().replace('\\', "/");
+            if s.starts_with('/') { format!("file://{s}") } else { format!("file:///{s}") }
+        };
+        let app_url = file_url(&app_file);
+        let pkg_url = file_url(&pkg_file);
+        let nodes = json!([
+            { "id": 1, "callFrame": { "functionName": "(root)", "url": "", "lineNumber": -1, "columnNumber": -1 }, "children": [2, 3, 4, 5] },
+            { "id": 2, "callFrame": { "functionName": "work", "url": app_url, "lineNumber": 0, "columnNumber": 0 }, "children": [] },
+            { "id": 3, "callFrame": { "functionName": "compile", "url": "node:vm", "lineNumber": 10, "columnNumber": 0 }, "children": [] },
+            { "id": 4, "callFrame": { "functionName": "scan", "url": pkg_url, "lineNumber": 0, "columnNumber": 0 }, "children": [] },
+            { "id": 5, "callFrame": { "functionName": "", "url": app_url, "lineNumber": 0, "columnNumber": 0 }, "children": [] }
+        ]);
+        // 200ms in app.mjs:work (20%), 500ms in node:vm (50%), 200ms in fast-glob (20%), 100ms in top-level anonymous (10%)
+        let low_prof = json!({
+            "nodes": nodes,
+            "startTime": 0,
+            "endTime": 1_000_000,
+            "samples": [2, 3, 4, 5],
+            "timeDeltas": [200_000, 500_000, 200_000, 100_000]
+        });
+        fs::write(prof.join("low.cpuprofile"), low_prof.to_string()).unwrap();
+        fs::write(dir.join("runner.mjs"), RUNNER).unwrap();
+        let result = dir.join("profile.json");
+        let job = json!({ "root": dir, "dir": prof, "entry": app_file, "out": result });
+        fs::write(dir.join("job.json"), job.to_string()).unwrap();
+        let out = Command::new("node").args(["runner.mjs", "profile", "job.json"]).current_dir(&dir).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&result).unwrap()).unwrap();
+        let notes = parsed["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1, "expected low-attribution note, got {notes:?}");
+        let note = notes[0].as_str().unwrap();
+        assert!(
+            note.contains("only 20.0% of the profiled run landed in your own named functions")
+                && note.contains("node:vm 50%")
+                && note.contains("fast-glob 20%")
+                && note.contains("top-level / anonymous code 10%")
+                && note.contains("V8's sampling profiler doesn't count calls"),
+            "unexpected note: {note}"
+        );
+
+        // When >= 50% of the run lands in named project functions, no low-attribution warning is emitted.
+        let high_prof = json!({
+            "nodes": nodes,
+            "startTime": 0,
+            "endTime": 1_000_000,
+            "samples": [2, 3],
+            "timeDeltas": [800_000, 200_000]
+        });
+        fs::remove_file(prof.join("low.cpuprofile")).unwrap();
+        fs::write(prof.join("high.cpuprofile"), high_prof.to_string()).unwrap();
+        let out = Command::new("node").args(["runner.mjs", "profile", "job.json"]).current_dir(&dir).output().unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&result).unwrap()).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(parsed["notes"].as_array().unwrap().is_empty(), "expected no note when attribution is high");
+    }
 }
