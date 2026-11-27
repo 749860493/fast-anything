@@ -105,7 +105,7 @@ fn call(params: &Value) -> Result<Value> {
         "fast_enable" => json!({ "enabled": pipeline::enable(&root, id, args["force"].as_bool().unwrap_or(false))? }),
         "fast_disable" => json!({ "disabled": pipeline::disable(&root, id)? }),
         "fast_bench" => serde_json::to_value(pipeline::bench(&root, args["runs"].as_u64().unwrap_or(5) as usize)?)?,
-        "fast_report" => serde_json::to_value(pipeline::report(&root)?)?,
+        "fast_report" => serde_json::to_value(pipeline::report(&root, false)?)?,
         "fast_status" => {
             let ctx = state::Ctx::open(&root)?;
             json!({ "command": ctx.state.command, "ports": ctx.state.ports, "bench": ctx.state.bench })

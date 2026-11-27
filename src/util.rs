@@ -186,9 +186,19 @@ pub fn civil_date(days: i64) -> (i64, u32, u32) {
 
 /// Today's date in UTC, e.g. "2026-11-26"; None if the clock is before 1970.
 pub fn today() -> Option<String> {
+    now_utc().map(|t| t[..10].to_string())
+}
+
+/// The time in UTC, e.g. "2026-11-26T18:40:00Z"; None if the clock is before 1970.
+pub fn now_utc() -> Option<String> {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(utc(secs))
+}
+
+fn utc(secs: u64) -> String {
     let (y, m, d) = civil_date((secs / 86_400) as i64);
-    Some(format!("{y:04}-{m:02}-{d:02}"))
+    let t = secs % 86_400;
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", t / 3600, t / 60 % 60, t % 60)
 }
 
 #[cfg(test)]
@@ -225,5 +235,8 @@ mod tests {
         assert_eq!(civil_date(-1), (1969, 12, 31));
         let today = today().unwrap();
         assert!(today.len() == 10 && today.starts_with("20"), "{today}");
+        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(20_783 * 86_400 + 18 * 3600 + 40 * 60 + 5), "2026-11-26T18:40:05Z");
+        assert!(now_utc().unwrap().starts_with(&today));
     }
 }

@@ -403,8 +403,8 @@ pub fn bench(root: &Path, runs: usize) -> Result<BenchResult> {
     Ok(result)
 }
 
-pub fn report(root: &Path) -> Result<ReportOut> {
-    report::write(&Ctx::open(root)?)
+pub fn report(root: &Path, include_android: bool) -> Result<ReportOut> {
+    report::write(&Ctx::open(root)?, include_android)
 }
 
 /// What the agent gets told after a failed attempt, or a right one that's slower than the original.
@@ -598,7 +598,7 @@ pub fn go(
     }
     ensure!(enabled > 0, "no port both passed verification and ran faster");
     show::bench(&bench(root, runs)?);
-    show::report(&report(root)?);
+    show::report(&report(root, false)?);
     Ok(())
 }
 

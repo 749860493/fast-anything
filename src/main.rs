@@ -1,6 +1,7 @@
 //! fast-anything: find the slow 5% of your app, rewrite just that in Rust, prove it behaves the same.
 
 mod agent;
+mod android;
 mod backend;
 mod bench;
 mod cfamily;
@@ -19,13 +20,14 @@ mod python;
 mod r;
 mod report;
 mod ruby;
+mod sha256;
 mod show;
 mod state;
 mod ui;
 mod util;
 
 use anyhow::{Result, bail, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -124,8 +126,17 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         runs: usize,
     },
+    /// Attach evidence measured on an Android device; the report keeps it apart from the host numbers
+    Import {
+        #[command(subcommand)]
+        what: Box<ImportCmd>,
+    },
     /// Write a shareable report (markdown + SVG card)
-    Report,
+    Report {
+        /// Require on-device (ART) evidence from fast-anything import (it's included whenever there is some)
+        #[arg(long)]
+        include_android: bool,
+    },
     /// Show the last scan and every port
     Status,
     /// Check that Rust, Python/Node and your agents are installed
@@ -135,6 +146,111 @@ enum Cmd {
     /// Replays recorded calls against a C-bridge port (used by verify, in its own process)
     #[command(name = "__replay", hide = true)]
     Replay { job: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Frame timing: the text of  adb shell dumpsys gfxinfo <package>
+    Gfxinfo(ImportArgs),
+    /// A report in fast-anything's on-device schema (version 1), e.g. made in CI
+    Json(ImportArgs),
+    /// A Perfetto trace, kept with its hash (not parsed yet)
+    Perfetto {
+        #[command(flatten)]
+        args: ImportArgs,
+        /// The R8/ProGuard mapping.txt of the build, recorded with the trace
+        #[arg(long)]
+        mapping: Option<PathBuf>,
+    },
+    /// A simpleperf perf.data, kept with its hash (not parsed yet)
+    Simpleperf {
+        #[command(flatten)]
+        args: ImportArgs,
+        /// The folder with the build's unstripped libraries, recorded with the profile
+        #[arg(long)]
+        symfs: Option<PathBuf>,
+    },
+}
+
+/// What was measured: --device, --package, --android-version, --abi and --build-variant are required,
+/// as flags or (for json) in the file.
+#[derive(Args)]
+struct ImportArgs {
+    /// The file to import
+    #[arg(long)]
+    input: PathBuf,
+    /// The app's package, e.g. com.example.app
+    #[arg(long)]
+    package: Option<String>,
+    /// The device's serial, as adb devices lists it
+    #[arg(long)]
+    device: Option<String>,
+    /// The device's model, e.g. 22041216G
+    #[arg(long)]
+    model: Option<String>,
+    /// e.g. 14
+    #[arg(long)]
+    android_version: Option<String>,
+    /// API level, e.g. 34
+    #[arg(long)]
+    api: Option<u32>,
+    /// e.g. arm64-v8a
+    #[arg(long)]
+    abi: Option<String>,
+    /// e.g. debug, release, benchmark
+    #[arg(long)]
+    build_variant: Option<String>,
+    #[arg(long)]
+    version_name: Option<String>,
+    #[arg(long)]
+    version_code: Option<u64>,
+    /// Android's thermal status at capture, 0 (none) to 6 (shutdown)
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=6))]
+    thermal_status: Option<u8>,
+    /// Measured runs in the capture
+    #[arg(long)]
+    runs: Option<u32>,
+    /// Warm-up runs before them
+    #[arg(long)]
+    warmup: Option<u32>,
+    /// When it was captured, e.g. 2026-11-24T18:40:00Z
+    #[arg(long)]
+    captured_at: Option<String>,
+    /// What captured it, e.g. "androidforge 1.0.0"
+    #[arg(long)]
+    captured_by: Option<String>,
+    /// Where to keep it, inside .fast/android (default: .fast/android/<format>)
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+impl ImportCmd {
+    fn into_import(self) -> android::Import {
+        use android::Format;
+        let (format, a, symbols) = match self {
+            ImportCmd::Gfxinfo(a) => (Format::Gfxinfo, a, None),
+            ImportCmd::Json(a) => (Format::Json, a, None),
+            ImportCmd::Perfetto { args, mapping } => (Format::Perfetto, args, mapping),
+            ImportCmd::Simpleperf { args, symfs } => (Format::Simpleperf, args, symfs),
+        };
+        let meta = android::Meta {
+            package: a.package,
+            device: a.device,
+            model: a.model,
+            android_version: a.android_version,
+            api: a.api,
+            abi: a.abi,
+            build_variant: a.build_variant,
+            version_name: a.version_name,
+            version_code: a.version_code,
+            thermal_status: a.thermal_status,
+            runs: a.runs,
+            warmup: a.warmup,
+            captured_at: a.captured_at,
+            captured_by: a.captured_by,
+        };
+        android::Import { format, input: a.input, meta, out: a.out, symbols }
+    }
 }
 
 fn main() -> ExitCode {
@@ -157,7 +273,7 @@ fn run(cmd: Cmd, root: &Path, json: bool) -> Result<()> {
         match &cmd {
             Cmd::Go { .. } | Cmd::Build | Cmd::Clean { .. } | Cmd::Mcp => {
                 bail!(
-                    "--json isn't supported for this command (supported: scan, port, verify, enable, disable, bench, report, status, doctor)"
+                    "--json isn't supported for this command (supported: scan, port, verify, enable, disable, bench, import, report, status, doctor)"
                 );
             }
             _ => ui::set_quiet(true),
@@ -279,8 +395,17 @@ fn run(cmd: Cmd, root: &Path, json: bool) -> Result<()> {
                 Ok(())
             }
         }
-        Cmd::Report => {
-            let out = pipeline::report(root)?;
+        Cmd::Import { what } => {
+            let out = android::import(root, &(*what).into_import())?;
+            if json {
+                show::json(&out)
+            } else {
+                show::import(&out);
+                Ok(())
+            }
+        }
+        Cmd::Report { include_android } => {
+            let out = pipeline::report(root, include_android)?;
             if json {
                 show::json(&out)
             } else {
@@ -369,6 +494,43 @@ mod tests {
         let app_flag = Cli::try_parse_from(["fast-anything", "scan", "--", "python", "app.py", "--json"]).unwrap();
         assert!(!app_flag.json);
         assert!(matches!(app_flag.cmd, Cmd::Scan { command, .. } if command == ["python", "app.py", "--json"]));
+    }
+
+    #[test]
+    fn import_lists_its_formats() {
+        let err = Cli::try_parse_from(["fast-anything", "import", "--help"]).err().unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp, "exits 0");
+        let help = err.to_string();
+        for format in ["gfxinfo", "perfetto", "simpleperf", "json"] {
+            assert!(help.contains(format), "{help}");
+        }
+        let cli = Cli::try_parse_from([
+            "fast-anything",
+            "import",
+            "perfetto",
+            "--input",
+            "t.pftrace",
+            "--mapping",
+            "mapping.txt",
+            "--thermal-status",
+            "6",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        let Cmd::Import { what } = cli.cmd else { panic!("import") };
+        let imp = (*what).into_import();
+        assert_eq!((imp.format, imp.meta.thermal_status), (android::Format::Perfetto, Some(6)));
+        assert_eq!(imp.symbols, Some(PathBuf::from("mapping.txt")));
+        assert!(
+            Cli::try_parse_from(["fast-anything", "import", "gfxinfo", "--input", "g.txt", "--thermal-status", "7"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["fast-anything", "import", "gfxinfo"]).is_err(), "--input is required");
+        assert!(matches!(
+            Cli::try_parse_from(["fast-anything", "report", "--include-android"]).unwrap().cmd,
+            Cmd::Report { include_android: true }
+        ));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! How results look in the terminal.
 
+use crate::android::ImportOut;
 use crate::bench::{BenchResult, OUTPUT_VARIES, Verdict};
 use crate::pipeline::{PortOut, ScanOut};
 use crate::report::ReportOut;
@@ -220,7 +221,33 @@ pub fn bench(b: &BenchResult) {
 
 pub fn report(r: &ReportOut) {
     ui::ok(format!("report: {}", r.markdown.display()));
-    ui::ok(format!("share card: {}", r.svg.display()));
+    if let Some(svg) = &r.svg {
+        ui::ok(format!("share card: {}", svg.display()));
+    }
+    if !r.android.is_empty() {
+        ui::ok(format!(
+            "with on-device (ART) evidence from {} import{}",
+            r.android.len(),
+            if r.android.len() == 1 { "" } else { "s" }
+        ));
+    }
+}
+
+pub fn import(out: &ImportOut) {
+    ui::ok(format!("imported {}: {}", bold(out.format), crate::android::samples_line(&out.evidence).replace("**", "")));
+    if out.evidence.pointer("/comparability/sample_status").and_then(|s| s.as_str()) != Some("ok")
+        && out.format == "gfxinfo"
+    {
+        ui::warn(format!(
+            "too few frames for a jank percentage: capture at least {} (scroll or animate while it records)",
+            crate::android::MIN_FRAMES
+        ));
+    }
+    if let Some(why) = out.evidence.get("symbolization_reason").and_then(|s| s.as_str()) {
+        ui::line(format!("  {}", dim(format!("symbolization not attempted: {why}"))));
+    }
+    ui::ok(format!("saved {} (raw input: {})", out.report.display(), out.raw.display()));
+    next("fast-anything report");
 }
 
 pub fn status(ctx: &Ctx) {
