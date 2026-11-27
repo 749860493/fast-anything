@@ -5,7 +5,7 @@
 <p align="center"><b>Don't rewrite it in Rust. Rewrite the 5% that's slow.</b></p>
 
 <p align="center">
-  <a href="https://trendshift.io/repositories/371252"><img src="https://trendshift.io/api/badge/repositories/371252" alt="EL4CTEO/fast-anything | Trendshift" width="250" height="55"></a>
+  <a href="https://trendshift.io/repositories/371252" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/371252/daily?language=Rust" alt="EL4CTEO/fast-anything: Rust repository of the day on Trendshift" width="250" height="55"></a>
 </p>
 
 <p align="center">
