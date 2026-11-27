@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.10
+
+- `scan` and the report show a function's own time next to its total, callees included (#163, #142).
+- `scan`: when a Gradle project with an Android module can't be scanned, the error says Android apps run on ART and only desktop JVMs are profiled (#136).
+
+Thanks @brixtonpham and @JuggyBob.
+
 ## 0.8.9
 
 - `--json` for machine-readable output (#145).
