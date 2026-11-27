@@ -96,6 +96,82 @@ pub fn scan(s: &ScanOut) {
     }
 }
 
+pub fn explain(e: &crate::pipeline::Explain) {
+    let cmd = bold(e.command.join(" "));
+    match (&e.lang, &e.runtime, &e.problem) {
+        (Some(lang), Some(exe), None) => ui::ok(format!("{cmd}: {} app, run with {}", lang.label(), dim(exe))),
+        (_, _, Some(why)) => ui::warn(format!("{cmd} can't be scanned as it is: {why}")),
+        _ => {}
+    }
+    for n in &e.notes {
+        ui::line(format!("  {}", yellow(format!("! {n}"))));
+    }
+    if e.problem.is_none() {
+        next(&format!("fast-anything scan -- {}", e.command.join(" ")));
+    }
+}
+
+pub fn android_scan(s: &crate::device::ScanOut) {
+    let mut on = s.device.clone();
+    if let Some(m) = &s.model {
+        on.push_str(&format!(" ({m})"));
+    }
+    if let Some(v) = &s.android_version {
+        on.push_str(&format!(", Android {v}"));
+    }
+    if let Some(a) = &s.abi {
+        on.push_str(&format!(", {a}"));
+    }
+    if s.started_app {
+        ui::line(format!("  {}", dim(format!("started {} on the device", s.package))));
+    }
+    ui::ok(format!(
+        "{} ({}) recorded for {}s on {on}: {} CPU samples",
+        bold(&s.package),
+        s.build_variant,
+        s.seconds,
+        thousands(s.samples)
+    ));
+    if let Some(t) = s.thermal_status.filter(|&t| t > 0) {
+        ui::warn(format!("the device was throttling (thermal status {t}): its times run slow"));
+    }
+    ui::line("");
+    if s.methods.is_empty() {
+        ui::line(format!(
+            "  None of {}'s own methods showed up. Use the app while it records, or record longer: --duration 30",
+            s.package
+        ));
+    } else {
+        ui::line(dim(format!("   #  {}  {:<16} {:>6}{:>11}", pad("method", 44), "total", "self", "samples")));
+        for (i, m) in s.methods.iter().take(10).enumerate() {
+            ui::line(format!(
+                "  {:>2}  {}  {} {:>5.1}% {:>5.1}%{:>11}",
+                i + 1,
+                pad_id(&m.symbol, 44),
+                rust(bar(m.total, 9)),
+                m.total * 100.0,
+                m.own * 100.0,
+                thousands(m.samples)
+            ));
+        }
+    }
+    if !s.elsewhere.is_empty() {
+        let rest: Vec<String> =
+            s.elsewhere.iter().take(3).map(|m| format!("{} {:.0}%", m.symbol, m.own * 100.0)).collect();
+        ui::line("");
+        ui::line(format!("  {}", dim(format!("outside the app's code, by own time: {}", rest.join(", ")))));
+    }
+    ui::line("");
+    ui::line(format!(
+        "  {}",
+        yellow(
+            "! measured on ART: a ranking only. Android code can't be ported to Rust yet, and these times aren't comparable with a host scan"
+        )
+    ));
+    ui::ok(format!("saved {} (raw: {})", s.report.display(), s.raw.display()));
+    next("fast-anything report");
+}
+
 /// What the profiler did to the run's time (#142): measured with --calibrate, or a pointer to it.
 fn overhead_line(s: &ScanOut) -> String {
     match (s.unprofiled, s.overhead()) {

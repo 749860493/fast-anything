@@ -191,7 +191,7 @@ pub fn check() -> Report {
     Report { ready_to_scan, ready_to_port, tools }
 }
 
-const ADB_NOT_USED: &str = "not used: Android apps run on ART and can't be scanned (see fast-anything import)";
+const ADB_NOT_USED: &str = "for scan --android: ranks an Android app's methods with simpleperf on the device";
 
 pub fn ensure_ready(report: &Report) -> Result<()> {
     ensure!(

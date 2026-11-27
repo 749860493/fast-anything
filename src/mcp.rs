@@ -23,8 +23,8 @@ fn tools() -> Value {
         tool(
             "fast_scan",
             "Run the app under a profiler and rank functions by time share and portability to Rust.",
-            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R and C#: stop the app after this many seconds (GUIs, servers)" }, "calibrate": { "type": "boolean", "description": "Also time the app 3 times without the profiler and return the profiler's overhead (not with duration)" }, "path": path }),
-            json!(["command"])
+            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R and C#: stop the app after this many seconds (GUIs, servers)" }, "calibrate": { "type": "boolean", "description": "Also time the app 3 times without the profiler and return the profiler's overhead (not with duration)" }, "android": { "type": "string", "description": "Instead of command: an installed Android app's package, ranked on a device with adb + simpleperf (duration defaults to 10)" }, "device": { "type": "string", "description": "With android: the device's adb serial" }, "path": path }),
+            json!([])
         ),
         tool(
             "fast_port",
@@ -71,6 +71,14 @@ fn call(params: &Value) -> Result<Value> {
     let root = args["path"].as_str().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let id = args["id"].as_str();
     Ok(match params["name"].as_str().unwrap_or_default() {
+        "fast_scan" if args["android"].is_string() => {
+            let opts = crate::device::Options {
+                package: args["android"].as_str().unwrap_or_default().into(),
+                device: args["device"].as_str().map(String::from),
+                seconds: args["duration"].as_f64().unwrap_or(crate::device::DEFAULT_SECONDS),
+            };
+            serde_json::to_value(crate::device::scan(&root, &opts)?)?
+        }
         "fast_scan" => {
             let command: Vec<String> = args["command"]
                 .as_array()

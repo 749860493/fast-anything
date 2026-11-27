@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 pub const SCHEMA_VERSION: u64 = 1;
 /// Fewer frames than this make a jank percentage meaningless: one frame is 0% or 100%.
 pub const MIN_FRAMES: u64 = 30;
+/// Fewer CPU samples than this (at 1 kHz, a tenth of a second) rank noise, not methods.
+pub const MIN_CPU_SAMPLES: u64 = 100;
 const NOT_COMPARABLE: &str = "ART frame timing is not comparable to native Rust wall time";
 const NOT_PARSED: &str = "fast-anything keeps the trace and its hash but doesn't parse or symbolize traces yet";
 
@@ -208,7 +210,7 @@ fn text_of(v: &Value) -> String {
 }
 
 /// Puts each given flag in its place, unless the report already says something else there.
-fn apply(doc: &mut Value, meta: &Meta) -> Result<()> {
+pub(crate) fn apply(doc: &mut Value, meta: &Meta) -> Result<()> {
     for (flag, [section, key], value) in meta.fields() {
         let Some(value) = value else { continue };
         let map = object(doc, section)?;
@@ -272,6 +274,8 @@ pub fn validate(mut doc: Value) -> Result<Value> {
     let warmup = number(&doc, &["samples", "warmup_runs"]).is_some_and(|w| w > 0.0);
     // thermal status 0 means the device wasn't throttling when it was captured
     let cool = number(&doc, &["thermal", "status"]) == Some(0.0);
+    // an on-device CPU profile (scan --android) counts samples, not frames
+    let cpu_samples = number(&doc, &["samples", "cpu_samples"]);
     let c = object(&mut doc, "comparability")?;
     if art {
         ensure!(
@@ -283,7 +287,12 @@ pub fn validate(mut doc: Value) -> Result<Value> {
     }
     c.entry("warmup").or_insert(json!(warmup));
     c.entry("thermal_controlled").or_insert(json!(cool));
-    if frames.is_some_and(|f| f >= MIN_FRAMES) {
+    if frames.is_none() && cpu_samples.is_some_and(|n| n >= MIN_CPU_SAMPLES as f64) {
+        c.entry("sample_status").or_insert(json!("ok"));
+    } else if frames.is_none() && cpu_samples.is_some() {
+        c.insert("sample_status".into(), json!("insufficient"));
+        c.entry("sample_reason").or_insert(json!(format!("fewer than {MIN_CPU_SAMPLES} CPU samples")));
+    } else if frames.is_some_and(|f| f >= MIN_FRAMES) {
         c.entry("sample_status").or_insert(json!("ok"));
     } else {
         c.insert("sample_status".into(), json!("insufficient"));
@@ -297,7 +306,7 @@ pub fn validate(mut doc: Value) -> Result<Value> {
 }
 
 /// A new report for a capture, before the flags are applied.
-fn skeleton(format: Format, samples: Map<String, Value>, input: &str, sha: &str) -> Value {
+pub(crate) fn skeleton(format: Format, samples: Map<String, Value>, input: &str, sha: &str) -> Value {
     json!({
         "schema_version": SCHEMA_VERSION,
         "source": format!("android-{}", format.name()),
@@ -452,6 +461,27 @@ pub fn samples_line(doc: &Value) -> String {
         _ => String::new(),
     };
     let why = text(doc, &["comparability", "sample_reason"]).unwrap_or_else(|| "too few frames".into());
+    if let Some(cpu) = n("cpu_samples") {
+        let over = n("duration_s").map(|d| format!(" over {d}s")).unwrap_or_default();
+        if text(doc, &["comparability", "sample_status"]).as_deref() != Some("ok") {
+            return format!("{cpu} CPU samples{over}: insufficient ({why})");
+        }
+        let top: Vec<String> = get(doc, &["hot_methods"])
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .take(5)
+                    .filter_map(|m| Some(format!("`{}` {:.1}%", m["symbol"].as_str()?, m["total"].as_f64()? * 100.0)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let top = if top.is_empty() {
+            "none of the app's own methods showed up".into()
+        } else {
+            format!("hottest app methods: {}", top.join(", "))
+        };
+        return format!("**{cpu}** CPU samples{over}; {top}");
+    }
     let Some(frames) = n("frames") else { return format!("samples{runs}: insufficient ({why})") };
     let s = if frames == 1.0 { "" } else { "s" };
     if text(doc, &["comparability", "sample_status"]).as_deref() != Some("ok") {

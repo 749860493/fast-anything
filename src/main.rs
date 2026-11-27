@@ -6,6 +6,7 @@ mod backend;
 mod bench;
 mod cfamily;
 mod csharp;
+mod device;
 mod doctor;
 mod golang;
 mod hotspot;
@@ -79,8 +80,17 @@ enum Cmd {
         /// Also time the app 3 times without the profiler, to show how much profiling slowed it down
         #[arg(long, conflicts_with = "duration")]
         calibrate: bool,
+        /// Rank an installed Android app's methods on a device (adb + simpleperf, debuggable or profileable build); default 10s
+        #[arg(long, value_name = "PACKAGE", conflicts_with_all = ["calibrate", "explain"])]
+        android: Option<String>,
+        /// With --android: the device's serial, as adb devices lists it
+        #[arg(long, requires = "android")]
+        device: Option<String>,
+        /// Say what the scan would profile and how (language, runtime, Android modules), without running the app
+        #[arg(long)]
+        explain: bool,
         /// How you run your app, after --
-        #[arg(last = true, required = true)]
+        #[arg(last = true, required_unless_present = "android")]
         command: Vec<String>,
     },
     /// Record a function's real calls and set up its Rust crate (default: the top candidate)
@@ -292,7 +302,26 @@ fn run(cmd: Cmd, root: &Path, json: bool) -> Result<()> {
         Cmd::Go { agent, top, attempts, runs, samples, command } => {
             pipeline::go(root, command, agent.as_deref(), top, attempts, runs, samples)
         }
-        Cmd::Scan { command, duration, calibrate } => {
+        Cmd::Scan { android: Some(package), device, duration, .. } => {
+            let opts = device::Options { package, device, seconds: duration.unwrap_or(device::DEFAULT_SECONDS) };
+            let out = device::scan(root, &opts)?;
+            if json {
+                show::json(&out)
+            } else {
+                show::android_scan(&out);
+                Ok(())
+            }
+        }
+        Cmd::Scan { explain: true, command, .. } => {
+            let out = pipeline::explain(root, &command)?;
+            if json {
+                show::json(&out)
+            } else {
+                show::explain(&out);
+                Ok(())
+            }
+        }
+        Cmd::Scan { command, duration, calibrate, .. } => {
             let out = pipeline::scan_with(root, command, duration, calibrate)?;
             if json {
                 show::json(&show::scan_json(&out))
@@ -534,6 +563,18 @@ mod tests {
             Cli::try_parse_from(["fast-anything", "report", "--include-android"]).unwrap().cmd,
             Cmd::Report { include_android: true }
         ));
+    }
+
+    #[test]
+    fn android_scan_needs_no_command() {
+        let cli = Cli::try_parse_from(["fast-anything", "scan", "--android", "com.example.app", "--device", "DM9X8"])
+            .unwrap();
+        let Cmd::Scan { android, device, command, .. } = cli.cmd else { panic!("scan") };
+        assert_eq!((android.as_deref(), device.as_deref(), command.len()), (Some("com.example.app"), Some("DM9X8"), 0));
+        assert!(Cli::try_parse_from(["fast-anything", "scan"]).is_err(), "a host scan still needs a command");
+        assert!(Cli::try_parse_from(["fast-anything", "scan", "--device", "x", "--", "python", "a.py"]).is_err());
+        let explain = Cli::try_parse_from(["fast-anything", "scan", "--explain", "--", "python", "a.py"]).unwrap();
+        assert!(matches!(explain.cmd, Cmd::Scan { explain: true, .. }));
     }
 
     #[test]

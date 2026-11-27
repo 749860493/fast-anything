@@ -71,7 +71,8 @@ pub fn scan_with(root: &Path, command: Vec<String>, duration: Option<f64>, calib
             let module =
                 if module.as_os_str().is_empty() { "this project".into() } else { module.display().to_string() };
             e.context(format!(
-                "{module} is an Android module, and Android apps run on ART, which fast-anything can't profile: it scans Java and Kotlin on a desktop JVM"
+                "{module} is an Android module, and Android apps run on ART, which this scan can't profile: it scans Java and Kotlin on a desktop JVM ({})",
+                crate::device::hint(None)
             ))
         }
         None => e,
@@ -106,6 +107,49 @@ pub fn scan_with(root: &Path, command: Vec<String>, duration: Option<f64>, calib
         None
     };
     Ok(ScanOut { command, wall: profile.wall, hotspots, notes, app_output, unprofiled })
+}
+
+/// What  scan --explain  finds without running the app (#136).
+#[derive(Serialize)]
+pub struct Explain {
+    pub command: Vec<String>,
+    pub lang: Option<Lang>,
+    pub runtime: Option<String>,
+    /// Why the scan can't run as given; None when it can.
+    pub problem: Option<String>,
+    /// An Android module in the project, relative to it ("" for the project itself).
+    pub android_module: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// What a scan of `command` would profile, and what would stop it, without running the app.
+pub fn explain(root: &Path, command: &[String]) -> Result<Explain> {
+    ensure!(
+        !command.is_empty(),
+        "put the command that runs your app after --, e.g.  fast-anything scan --explain -- python app.py"
+    );
+    let root = util::absolute(root);
+    let android = crate::java::android_module(&root).map(|m| crate::util::forward_slashes(&m));
+    let mut notes = Vec::new();
+    if let Some(m) = &android {
+        let module = if m.is_empty() { "this project".to_string() } else { m.clone() };
+        notes.push(format!(
+            "{module} is an Android module: it runs on ART, which the desktop JVM scan can't profile. Android Studio keeps Kotlin in app/src/main/java; the JVM scan needs a desktop run target (Gradle's application plugin, src/main/kotlin)"
+        ));
+        notes.push(crate::device::hint(None));
+    }
+    let (lang, runtime, problem) = match Lang::detect(&command[0]) {
+        Err(e) => (None, None, Some(format!("{e:#}"))),
+        Ok(lang) => {
+            let lang = crate::cfamily::refine(lang, &command[1..]);
+            let lang = crate::kotlin::refine(lang, &command[0], &root);
+            match lang.resolve(&command[0], &command[1..], &root) {
+                Ok(exe) => (Some(lang), Some(exe), None),
+                Err(e) => (Some(lang), None, Some(format!("{e:#}"))),
+            }
+        }
+    };
+    Ok(Explain { command: command.to_vec(), lang, runtime, problem, android_module: android, notes })
 }
 
 /// Keep what the app printed, so a successful scan doesn't swallow it (#142).
@@ -684,6 +728,21 @@ mod tests {
         assert!(sampled[0].contains("no call counts"), "{sampled:?}");
         let low = attribution_notes(&[h(0.203, 0), h(0.1, 0)]);
         assert!(low.len() == 2 && low[1].starts_with("your biggest function takes only 20% of the run"), "{low:?}");
+    }
+
+    #[test]
+    fn explain_names_an_android_module_without_running_anything() {
+        let dir = std::env::temp_dir().join(format!("fa-explain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("app/src/main")).unwrap();
+        fs::write(dir.join("app/build.gradle.kts"), r#"plugins { id("com.android.application") }"#).unwrap();
+        let e = explain(&dir, &["./gradlew".into(), "run".into()]).unwrap();
+        assert_eq!(e.android_module.as_deref(), Some("app"));
+        assert!(e.notes[0].contains("app/src/main/java") && e.notes[1].contains("scan --android"), "{:?}", e.notes);
+        let unknown = explain(&dir, &["nosuchtool-fa".into()]).unwrap();
+        assert!(unknown.lang.is_none() && unknown.problem.is_some());
+        assert!(!dir.join(".fast").exists(), "explain writes nothing");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
