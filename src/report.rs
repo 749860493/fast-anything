@@ -136,12 +136,18 @@ fn scan_section(s: &State, b: &BenchResult) -> String {
         });
     }
     md.push_str(
-        ". Shares are of that profiled run and count each function's callees too. They are not direct ratios: the profiler slows some code more than the rest, so a share isn't the part of the original's time a port can save.\n\n| # | function | share of the profiled run | calls | outcome |\n|---|---|---|---|---|\n",
+        ". Shares are of that profiled run (`total` includes callees; `self` is the function's own body). They are not direct ratios: the profiler slows some code more than the rest, so a share isn't the part of the original's time a port can save.\n\n| # | function | total | self | calls | outcome |\n|---|---|---|---|---|---|\n",
     );
     for (i, h) in s.hotspots.iter().take(TOP).enumerate() {
         let calls = if h.ncalls == 0 { "-".to_string() } else { thousands(h.ncalls) };
         let outcome = outcome(h, s).replace('|', "\\|").replace('\n', " ");
-        md.push_str(&format!("| {} | `{}` | {:.1}% | {calls} | {outcome} |\n", i + 1, h.id, h.share * 100.0));
+        md.push_str(&format!(
+            "| {} | `{}` | {:.1}% | {:.1}% | {calls} | {outcome} |\n",
+            i + 1,
+            h.id,
+            h.share * 100.0,
+            h.effective_self_share(s.wall) * 100.0
+        ));
     }
     if s.hotspots.len() > TOP {
         md.push_str(&format!("\n{} more functions from the scan ranked lower.\n", s.hotspots.len() - TOP));
@@ -314,21 +320,22 @@ mod tests {
 
     #[test]
     fn report_shows_how_the_ports_were_chosen() {
-        let hotspot = |id: &str, share: f64, ncalls: u64| Hotspot {
+        let hotspot = |id: &str, share: f64, self_share: f64, ncalls: u64| Hotspot {
             id: id.into(),
             share,
+            self_share,
             ncalls,
             portability: 0.9,
             ..Hotspot::default()
         };
         let mut hotspots = vec![
-            Hotspot { blockers: vec!["does I/O: print".into()], ..hotspot("app.main", 0.99, 1) },
-            hotspot("fuzzy.lev", 0.81, 1_250_000),
-            Hotspot { covered_by: Some("fuzzy.lev".into()), ..hotspot("fuzzy.cost", 0.3, 9_000_000) },
-            hotspot("fuzzy.norm", 0.05, 2_000),
-            hotspot("fuzzy.tiny", 0.004, 10),
+            Hotspot { blockers: vec!["does I/O: print".into()], ..hotspot("app.main", 0.99, 0.02, 1) },
+            hotspot("fuzzy.lev", 0.81, 0.51, 1_250_000),
+            Hotspot { covered_by: Some("fuzzy.lev".into()), ..hotspot("fuzzy.cost", 0.3, 0.3, 9_000_000) },
+            hotspot("fuzzy.norm", 0.05, 0.05, 2_000),
+            hotspot("fuzzy.tiny", 0.004, 0.004, 10),
         ];
-        hotspots.extend((0..5).map(|i| hotspot(&format!("util.f{i}"), 0.001, 0)));
+        hotspots.extend((0..5).map(|i| hotspot(&format!("util.f{i}"), 0.001, 0.001, 0)));
         let verify = Verify {
             built: true,
             total: 500,
@@ -379,12 +386,12 @@ mod tests {
         );
         assert!(md.contains("They are not direct ratios"), "{md}");
         for row in [
-            "| 1 | `app.main` | 99.0% | 1 | does I/O: print |",
-            "| 2 | `fuzzy.lev` | 81.0% | 1,250,000 | ported and enabled |",
-            "| 3 | `fuzzy.cost` | 30.0% | 9,000,000 | ported inside fuzzy.lev |",
-            "| 4 | `fuzzy.norm` | 5.0% | 2,000 | portable, not ported |",
-            "| 5 | `fuzzy.tiny` | 0.4% | 10 | too small to matter (0.4% of the run, 2% needed) |",
-            "| 6 | `util.f0` | 0.1% | - |",
+            "| 1 | `app.main` | 99.0% | 2.0% | 1 | does I/O: print |",
+            "| 2 | `fuzzy.lev` | 81.0% | 51.0% | 1,250,000 | ported and enabled |",
+            "| 3 | `fuzzy.cost` | 30.0% | 30.0% | 9,000,000 | ported inside fuzzy.lev |",
+            "| 4 | `fuzzy.norm` | 5.0% | 5.0% | 2,000 | portable, not ported |",
+            "| 5 | `fuzzy.tiny` | 0.4% | 0.4% | 10 | too small to matter (0.4% of the run, 2% needed) |",
+            "| 6 | `util.f0` | 0.1% | 0.1% | - |",
         ] {
             assert!(md.contains(row), "{row}\n{md}");
         }

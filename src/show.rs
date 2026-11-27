@@ -50,7 +50,7 @@ pub fn scan(s: &ScanOut) {
         }
         return;
     }
-    ui::line(dim(format!("   #  {}  {:<16}{:>11}  verdict", pad("function", 30), "time", "calls")));
+    ui::line(dim(format!("   #  {}  {:<16} {:>6}{:>11}  verdict", pad("function", 30), "total", "self", "calls")));
     for (i, h) in s.hotspots.iter().take(10).enumerate() {
         let verdict = if let Some(by) = &h.covered_by {
             dim(format!("↳ ported inside {}", by.rsplit(['.', ':']).next().unwrap_or(by)))
@@ -62,11 +62,12 @@ pub fn scan(s: &ScanOut) {
             dim(format!("✗ {}", h.blockers[0]))
         };
         let row = format!(
-            "  {:>2}  {}  {} {:>5.1}%{:>11}  {verdict}",
+            "  {:>2}  {}  {} {:>5.1}% {:>5.1}%{:>11}  {verdict}",
             i + 1,
             pad_id(&h.id, 30),
             rust(bar(h.share, 9)),
             h.share * 100.0,
+            h.effective_self_share(s.wall) * 100.0,
             if h.ncalls == 0 { "-".to_string() } else { thousands(h.ncalls) }
         );
         ui::line(if h.worth_it() { row } else { dim(row) });
@@ -284,6 +285,7 @@ pub fn scan_json(s: &ScanOut) -> Value {
                 "file": h.file,
                 "line": h.line,
                 "share": h.share,
+                "self_share": h.effective_self_share(s.wall),
                 "calls": h.ncalls,
                 "tottime": h.tottime,
                 "cumtime": h.cumtime,
@@ -392,7 +394,10 @@ mod tests {
                     file: "fuzzy.py".into(),
                     line: 10,
                     ncalls: 1000,
+                    tottime: 1.5,
+                    cumtime: 2.0,
                     share: 0.8,
+                    self_share: 0.6,
                     ..Hotspot::default()
                 },
                 Hotspot {
@@ -400,7 +405,10 @@ mod tests {
                     file: "fuzzy.py".into(),
                     line: 30,
                     ncalls: 1,
+                    tottime: 0.25,
+                    cumtime: 0.5,
                     share: 0.2,
+                    self_share: 0.1,
                     blockers: vec!["does I/O".into()],
                     ..Hotspot::default()
                 },
@@ -410,6 +418,10 @@ mod tests {
         let parsed = parse(scan_json(&scan));
         assert_eq!(parsed["command"], json!(["python", "app.py"]));
         assert_eq!(parsed["wall_seconds"], 2.5);
+        assert_eq!(
+            (&parsed["hotspots"][0]["self_share"], &parsed["hotspots"][1]["self_share"]),
+            (&json!(0.6), &json!(0.1))
+        );
         assert_eq!(
             (&parsed["hotspots"][0]["worth_porting"], &parsed["hotspots"][1]["why_not"]),
             (&json!(true), &json!("does I/O"))

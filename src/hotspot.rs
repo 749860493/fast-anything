@@ -34,6 +34,8 @@ pub struct Hotspot {
     pub cumtime: f64,
     /// Share of the run spent in this function, callees included.
     pub share: f64,
+    /// Share of the run spent in this function's own body, excluding callees.
+    pub self_share: f64,
     /// 0 = can't be ported, 1 = ideal candidate.
     pub portability: f64,
     pub score: f64,
@@ -61,6 +63,18 @@ impl Hotspot {
 
     pub fn worth_it(&self) -> bool {
         self.portable() && self.covered_by.is_none() && self.share >= WORTH_IT
+    }
+
+    /// Share of `wall` spent in this function's own body (excludes callees), falling back to
+    /// `tottime / wall` for state saved before `self_share` was stored.
+    pub fn effective_self_share(&self, wall: f64) -> f64 {
+        if self.self_share > 0.0 {
+            self.self_share
+        } else if wall > 0.0 && self.tottime > 0.0 {
+            (self.tottime / wall).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Why it isn't worth porting, if it isn't.
@@ -205,6 +219,7 @@ pub fn rank(mut list: Vec<Hotspot>, wall: f64) -> Vec<Hotspot> {
             _ => format!("{}:{}", h.file, h.qualname),
         };
         h.share = if wall > 0.0 { (h.cumtime / wall).clamp(0.0, 1.0) } else { 0.0 };
+        h.self_share = if wall > 0.0 { (h.tottime / wall).clamp(0.0, 1.0) } else { 0.0 };
         h.portability = if h.portable() { h.portability.clamp(0.0, 1.0) } else { 0.0 };
         h.score = h.share * h.portability;
     }
@@ -265,6 +280,25 @@ mod tests {
     }
 
     #[test]
+    fn rank_computes_self_and_total_shares() {
+        let mut driver = hs("driver", Some("app"), 10.0, 1.0, true);
+        driver.tottime = 0.5;
+        let mut leaf = hs("leaf", Some("app"), 9.5, 1.0, false);
+        leaf.tottime = 9.5;
+        let ranked = rank(vec![driver, leaf], 10.0);
+        assert_eq!(ranked[0].id, "app.leaf");
+        assert!((ranked[0].share - 0.95).abs() < 1e-9);
+        assert!((ranked[0].self_share - 0.95).abs() < 1e-9);
+        assert_eq!(ranked[1].id, "app.driver");
+        assert!((ranked[1].share - 1.0).abs() < 1e-9);
+        assert!((ranked[1].self_share - 0.05).abs() < 1e-9);
+        assert!((ranked[1].effective_self_share(10.0) - 0.05).abs() < 1e-9);
+
+        let legacy = Hotspot { tottime: 2.5, cumtime: 5.0, share: 0.5, ..Hotspot::default() };
+        assert!((legacy.effective_self_share(10.0) - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
     fn portable_beats_bigger_but_blocked() {
         let ranked = rank(
             vec![
@@ -276,6 +310,7 @@ mod tests {
         );
         assert_eq!(ranked[0].id, "fuzzy.lev");
         assert!((ranked[0].share - 0.9).abs() < 1e-9);
+        assert_eq!(ranked[0].self_share, 0.0);
         assert_eq!(ranked[1].id, "fuzzy.norm");
         assert_eq!(ranked[2].id, "app.py:main");
         assert_eq!(ranked[2].score, 0.0);
