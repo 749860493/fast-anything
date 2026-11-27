@@ -131,7 +131,7 @@ fn scan_section(s: &State, b: &BenchResult) -> String {
     );
     let (wall, original) = (s.wall, s.unprofiled.filter(|&u| u > 0.0).unwrap_or(b.before.median));
     let baseline =
-        if s.unprofiled.is_some_and(|u| u > 0.0) { "when calibrated" } else { "the original's median above" };
+        if s.unprofiled.is_some_and(|u| u > 0.0) { "timed by scan --calibrate" } else { "the original's median above" };
     if wall > 0.0 && original > 0.0 {
         md.push_str(&if wall >= original {
             format!(
@@ -507,7 +507,7 @@ mod tests {
         let calibrated = State { unprofiled: Some(3.1), ..s.clone() };
         let md = markdown("app", &b, &calibrated, &[]);
         assert!(
-            md.contains("`python app.py`, which took **12.40s** under the profiler against **3.10s** without it (when calibrated): profiling made it run 4.0× as long."),
+            md.contains("`python app.py`, which took **12.40s** under the profiler against **3.10s** without it (timed by scan --calibrate): profiling made it run 4.0× as long."),
             "{md}"
         );
 
