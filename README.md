@@ -117,6 +117,16 @@ With Intel oneAPI on Windows, run fast-anything from a shell where `setvars.bat`
 
 Ruby, Java, Go, PHP, C, C++, C# and R need no headers, bindings or extra tools: the port is a plain Rust library with one C entry point taking and returning JSON, and fast-anything replays the recorded calls against it directly. Any language that can call C can use that bridge. A C port also has a typed entry point that takes the function's own arguments and returns its result, NaN and infinity included; the C app calls that one, and verify replays and times it.
 
+## Sponsors
+
+fast-anything is free and open source. If it saves you time, sponsoring keeps it maintained.
+
+<p>
+  <a href="https://github.com/sponsors/EL4CTEO"><img src="https://img.shields.io/badge/Become_a_sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white" alt="Become a sponsor"></a>
+</p>
+
+Company sponsors get a logo and a link here, nothing more: no paid recommendations.
+
 ## License
 
 MIT
