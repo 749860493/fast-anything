@@ -5,6 +5,17 @@ use anyhow::{Result, ensure};
 use serde::Serialize;
 use std::process::Command;
 
+/// The java on the PATH, else the one JAVA_HOME names (Gradle and Maven builds use that one), so a JDK
+/// that's only too old says so rather than "not found" (#136).
+fn java() -> Option<String> {
+    version("java", &["--version"]).or_else(|| {
+        let home = std::env::var_os("JAVA_HOME").filter(|h| !h.is_empty())?;
+        let java = std::path::Path::new(&home).join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+        // -version, unlike --version, works on Java 8 too
+        version(&java.to_string_lossy(), &["-version"]).map(|v| format!("{v} (JAVA_HOME)"))
+    })
+}
+
 fn version(program: &str, args: &[&str]) -> Option<String> {
     let run = |p: &str| Command::new(p).args(args).output().ok().filter(|o| o.status.success());
     let out = run(program).or_else(|| if cfg!(windows) { run(&format!("{program}.cmd")) } else { None })?;
@@ -110,12 +121,7 @@ pub fn check() -> Report {
             need: "for Ruby apps (3.3+)",
             hint: "https://ruby-lang.org",
         },
-        Check {
-            name: "java",
-            found: version("java", &["--version"]),
-            need: "for Java apps (22+)",
-            hint: "https://adoptium.net",
-        },
+        Check { name: "java", found: java(), need: "for Java apps (22+)", hint: "https://adoptium.net" },
         Check {
             name: "go",
             found: version("go", &["version"]),
@@ -172,12 +178,20 @@ pub fn check() -> Report {
             need: "--agent codex",
             hint: "npm i -g @openai/codex",
         },
+        Check {
+            name: "adb",
+            found: version("adb", &["--version"]),
+            need: ADB_NOT_USED,
+            hint: "https://developer.android.com/tools/adb",
+        },
     ];
     let tools: Vec<Tool> = checks.into_iter().map(Check::into_tool).collect();
     let ready_to_scan = tools[1..12].iter().any(|t| t.ok);
     let ready_to_port = tools[0].ok;
     Report { ready_to_scan, ready_to_port, tools }
 }
+
+const ADB_NOT_USED: &str = "not used: Android apps run on ART and can't be scanned (see fast-anything import)";
 
 pub fn ensure_ready(report: &Report) -> Result<()> {
     ensure!(
@@ -191,6 +205,10 @@ pub fn run() -> Result<()> {
     let report = check();
     for t in &report.tools {
         match (&t.version, &t.problem) {
+            // only informational: nothing fast-anything runs needs it
+            (Some(v), None) if t.name == "adb" => {
+                ui::line(format!("  {} {:<8} {} {}", yellow("·"), t.name, dim(v), dim(t.need)))
+            }
             (Some(v), None) => ui::line(format!("  {} {:<8} {}", green("✓"), bold(t.name), dim(v))),
             (Some(v), Some(why)) => ui::line(format!("  {} {:<8} {} {}", red("✗"), bold(t.name), dim(v), why)),
             (None, _) if t.name == "cargo" => {
@@ -231,6 +249,13 @@ mod tests {
         assert_eq!(problem("node", "v22.0.0"), None);
         assert!(problem("python", "Python 3.9.18").is_some());
         assert_eq!(problem("clang", "Debian clang version 14.0.6"), None, "no minimum");
+        assert!(
+            problem("java", "openjdk version \"17.0.10\" 2024-01-16 (JAVA_HOME)")
+                .is_some_and(|p| p.contains("too old, 22")),
+            "a JDK found through JAVA_HOME"
+        );
+        assert!(problem("java", "java version \"1.8.0_391\" (JAVA_HOME)").is_some_and(|p| p.contains("too old")));
+        assert_eq!(problem("adb", "Android Debug Bridge version 1.0.41"), None);
     }
 
     #[test]
