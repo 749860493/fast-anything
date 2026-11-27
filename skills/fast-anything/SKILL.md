@@ -1,6 +1,6 @@
 ---
 name: fast-anything
-description: Speed up a slow Python, Node.js/TypeScript, Ruby, Java, Go, PHP, C, C++ or C# app by porting its hottest pure functions to Rust and proving each port gives the same results on real recorded calls. Use when the user wants their Python code faster, asks about hot paths or profiling, or says "rewrite the slow part in Rust".
+description: Speed up a slow Python, Node.js/TypeScript, Ruby, Java, Kotlin, Go, PHP, C, C++, C# or R app by porting its hottest pure functions to Rust and proving each port gives the same results on real recorded calls. Use when the user wants their Python code faster, asks about hot paths or profiling, or says "rewrite the slow part in Rust".
 ---
 
 # fast-anything

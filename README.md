@@ -18,9 +18,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-555" alt="MIT"></a>
 </p>
 
-Rewriting a whole app in Rust costs months, minute-long compiles and gigabytes of `target/`. Most of the runtime sits in a few functions anyway.
-
-**fast-anything** finds those functions, has your coding agent port *only them* to Rust, proves the port gives the same results on real recorded calls, and swaps it in. One command, fully reversible.
+Most of an app's runtime sits in a few functions. **fast-anything** finds them, has your coding agent port *only those* to Rust, proves the port returns the same results on real recorded calls, and swaps it in. Reversible, one function at a time.
 
 <p align="center"><img src="https://raw.githubusercontent.com/EL4CTEO/fast-anything/main/docs/assets/demo.gif" alt="fast-anything go --agent claude -- python app.py" width="820"></p>
 
@@ -30,93 +28,90 @@ Rewriting a whole app in Rust costs months, minute-long compiles and gigabytes o
 npm i -g @el4cteo/fast-anything      # or: cargo install fast-anything
 ```
 
-Ports are compiled with your Rust toolchain ([rustup](https://rustup.rs)).
+The command is `fast-anything`. Scanning needs only your app's runtime; porting needs Rust ([rustup](https://rustup.rs)). `fast-anything doctor` checks both.
 
 ## Use
 
 ```sh
-fast-anything go --agent claude -- python app.py     # or: -- node app.ts / bun app.ts / deno run -A app.ts / ruby app.rb / java App.java / mvn exec:java / gradle run / go run . / php app.php / clang -O2 main.c / Rscript app.R
+fast-anything go --agent claude -- python app.py
 ```
 
-Or step by step:
+Use the command you normally run your app with (`node app.ts`, `go run .`, `gradle run`, `dotnet run`, …). `--agent` takes `claude`, `codex` or any command that reads a prompt on stdin.
+
+Step by step:
 
 | command | what it does |
 |---|---|
-| `scan -- <cmd>` | profiles the app, ranks functions by time × how portable they are |
-| `port [id]` | records up to 500 real calls, creates a one-function Rust crate + `TASK.md` |
-| `verify` | release-builds the port and replays every recorded call |
-| `enable` / `disable` | swaps the Rust in or out (one marked block, removed byte for byte) |
-| `bench` | times the whole app in rotated rounds of original, original again (an A/A control for noise) and Rust, plus one warm-up per side (`--runs 5` = 11 original runs, 6 Rust runs); wall and CPU time |
+| `scan -- <cmd>` | profiles the app and ranks functions by time and portability |
+| `port [id]` | records real calls and creates a one-function Rust crate with a `TASK.md` |
+| `verify` | builds the port and replays every recorded call against it |
+| `enable` / `disable` | switches the Rust in or out |
+| `bench` | times the whole app, original vs Rust, with an A/A noise control |
 | `report` | markdown + SVG card for your PR |
-| `import gfxinfo` / `perfetto` / `simpleperf` / `json` | keeps evidence measured on an Android device (ART) with its metadata and SHA-256; `report` shows it in its own section, never as a speed-up against the host numbers |
-| `doctor` | checks Rust, your runtimes and your agents |
+| `status` / `doctor` | where things stand / what's installed |
 
-`--agent` takes `claude`, `codex`, or any command that reads a prompt on stdin. Without it, hand `TASK.md` to whatever you use.
+Useful `scan` flags: `--duration 30` for servers and GUIs, `--calibrate` to measure the profiler's overhead, `--explain` to check the setup without running. Every command takes `--json`.
 
 ## Proof, not vibes
 
 <p align="center"><img src="https://raw.githubusercontent.com/EL4CTEO/fast-anything/main/docs/assets/verify.gif" alt="verify catches a wrong port" width="820"></p>
 
-That port looked right but compared bytes instead of characters. 148 of 500 real calls caught it. On top of the recorded calls, fast-anything derives extra cases and lets the original answer them: edge cases (NaN, ±infinity, -0.0, zero and ±1, non-ASCII text, empty and up to 16× bigger inputs) and shrunk inputs (tiny and random slices). Nothing is enabled until every case matches: same values (floats within 1e-9 of their size or of the largest value in the same list, -0.0 not 0.0), errors where the original errors. A port that is right but slower per call than the original (calling into Rust costs more than the work saved) isn't enabled either, nor is one whose original takes about as long as a clock read (where each call is timed on its own: C, C++, Go, Java, Kotlin, PHP, C#), since the per-call times can't show a saving there. `FAST_ANYTHING_DISABLE=1` runs the original any time.
-
-Every 5th recorded call (from 5 calls up) is held out of the crate folder the agent works in: verify replays it too but reports a mismatch there without the values, so a port that special-cases the calls it was shown still fails. verify deletes its working copy of those calls when it's done. It's a guard against a port fitted to the calls it was shown, not a sandbox: an agent that goes looking can still read them in `.fast/holdout`.
+- Every port is replayed against up to 500 real calls, plus edge cases (NaN, ±infinity, -0.0, empty, non-ASCII, bigger inputs) answered by the original.
+- Every 5th call is held out from the agent, so a port can't special-case what it was shown.
+- Nothing is enabled until all cases match, and a port that's slower per call stays off.
+- `FAST_ANYTHING_DISABLE=1` runs the original any time.
 
 ## Results
 
-Real runs on an i5-10500, Windows 11 (C and C++: a 4-core GitHub Actions Linux runner). Reproduce them from [`examples/`](examples).
+Real runs on an i5-10500, Windows 11 (C and C++: a GitHub Actions Linux runner). Reproduce them from [`examples/`](examples).
 
 | app | before | after |
 |---|---|---|
-| Python fuzzy dedupe (700 names) | 4.91s | **42ms, 116×** |
-| TypeScript fuzzy dedupe (2,000 names) | 3.11s | **155ms, 20×** |
-| PHP fuzzy dedupe (600 names) | 2.94s | **53ms, 55×** |
-| Go fuzzy dedupe (3,000 names) | 3.02s | **144ms, 21×** |
-| Ruby fuzzy dedupe (400 names) | 3.13s | **228ms, 14×** |
-| C# fuzzy dedupe (4,000 names) | 4.03s | **312ms, 13×** |
-| Java fuzzy dedupe (4,000 names) | 3.50s | **1.18s, 3×** (11× on the function; the rest is JVM startup) |
-| C mandelbrot (8 zoom levels) | 431ms | **127ms, 3.4×** |
-| C++ fuzzy dedupe (6,000 names) | 3.02s | **1.09s, 2.7×** |
+| Python fuzzy dedupe | 4.91s | **42ms, 116×** |
+| PHP fuzzy dedupe | 2.94s | **53ms, 55×** |
+| Go fuzzy dedupe | 3.02s | **144ms, 21×** |
+| TypeScript fuzzy dedupe | 3.11s | **155ms, 20×** |
+| Ruby fuzzy dedupe | 3.13s | **228ms, 14×** |
+| C# fuzzy dedupe | 4.03s | **312ms, 13×** |
+| C mandelbrot | 431ms | **127ms, 3.4×** |
+| Java fuzzy dedupe | 3.50s | **1.18s, 3×** (11× on the function; the rest is JVM startup) |
+| C++ fuzzy dedupe | 3.02s | **1.09s, 2.7×** |
 
-fast-anything ports the outermost loop it can, not the tiny function called inside it, so the app crosses into Rust once instead of millions of times. Porting only the inner `levenshtein` gave 35× and 1.9×.
-
-## Why not rewrite it all?
-
-- **Compile time**: each port is a one-function crate. Seconds, not minutes.
-- **Cache**: every port shares one `.fast/target`. Delete it whenever you like (`fast-anything clean`).
-- **Risk**: your code stays as it is. Rust is opt-in per function, checked against real behavior.
-
-## Agents
-
-**Plugin**: the repo is an agent plugin marketplace ([`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json)) that bundles the skill and the MCP server. Install the CLI first, then:
-
-- **Codex**: `codex plugin marketplace add EL4CTEO/fast-anything`, then install `fast-anything` from `/plugins`
-- **Claude Code**: `/plugin marketplace add EL4CTEO/fast-anything`, then `/plugin install fast-anything@fast-anything` and `/fast-anything:fast python app.py`
-
-Or wire it up by hand:
-
-- **MCP server** (Claude Code, Codex, Cursor…), built into the binary: `claude mcp add fast-anything -- fast-anything mcp`. 8 tools: `fast_scan`, `fast_port`, `fast_verify`, `fast_enable`, `fast_disable`, `fast_bench`, `fast_report`, `fast_status`.
-- **Skill**: [`skills/fast-anything`](skills/fast-anything/SKILL.md) teaches any agent the loop.
+It ports the outermost loop it can, so the app crosses into Rust once instead of millions of times.
 
 ## Languages
 
-| language | binding | status |
-|---|---|---|
-| Python 3.10+ | PyO3; servers and GUIs: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
-| JavaScript / TypeScript (Node 22+, Bun, Deno 2+: `bun app.ts`, `deno run -A app.ts`) | napi-rs; servers: `scan --duration 30` (ends them with `process.exit`) | ✅ |
-| Ruby 3.3+ | C ABI + JSON, through Ruby's built-in Fiddle; servers: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
-| Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API; servers: `scan --duration 30` | ✅ |
-| Kotlin/JVM (Gradle, `src/main/kotlin`, JDK 22+) | the Java bridge; top-level functions, `object` and companion members, extension functions | ✅ |
-| Go 1.22+ (`go run .`) | the same C bridge, through the Windows loader or dlopen (cgo); servers: `scan --duration 30` | ✅ |
-| PHP 8.1+ (`php app.php`) | the same C bridge, through PHP's FFI extension (`extension=ffi`); servers: `scan --duration 30` (with `pcntl`) | ✅ |
-| C and C++ (gcc, clang or Intel oneAPI icx/icpx: `clang -O2 main.c lib.c`) | the same C bridge (C passes its arguments as they are, no JSON), through LoadLibrary or dlopen; servers: `scan --duration 30` | ✅ |
-| C# / .NET 8+ (`dotnet run -c Release`) | the same C bridge, through NativeLibrary; profiled with EventPipe, nothing to install; GUIs and servers: `scan --duration 30` | ✅ |
-| R 4.0+ (`Rscript app.R`) | the same C bridge, through base R's `.C()`; profiled with Rprof, no packages or R headers needed; servers: `scan --duration 30` | ✅ |
+| language | how it's run |
+|---|---|
+| Python 3.10+ | `python app.py` (PyO3) |
+| JavaScript / TypeScript | `node` 22+, `bun`, `deno run -A` (napi-rs) |
+| Ruby 3.3+ | `ruby app.rb` |
+| Java 22+ | `java App.java`, Maven, Gradle |
+| Kotlin/JVM | Gradle, `src/main/kotlin`, JDK 22+ |
+| Go 1.22+ | `go run .` |
+| PHP 8.1+ | `php app.php` (FFI extension) |
+| C / C++ | gcc, clang, icx/icpx |
+| C# / .NET 8+ | `dotnet run -c Release` |
+| R 4.0+ | `Rscript app.R` |
 
-It ports top-level, deterministic functions that take plain data (numbers, strings, lists, dicts, typed arrays…), including ones in your entry script when its main code sits under `if __name__ == "__main__":` (or `if __FILE__ == $0`, or `if (import.meta.main)` / `if (require.main === module)`). In Python that means module-level functions, `@staticmethod`s and `@classmethod`s that don't use `cls` (dataclasses, NamedTuples and numeric NumPy arrays count as plain data), in Java, C# and PHP static methods (and PHP functions), in Go plain functions, in C and C++ free functions and static methods. `scan` says why anything else can't move yet.
+Python and JS/TS use native bindings; the rest call the port through one C entry point, with no headers or extra tools. It ports top-level, deterministic functions that take plain data (numbers, strings, lists, maps, arrays). `scan` says why anything else can't move yet.
 
-With Intel oneAPI on Windows, run fast-anything from a shell where `setvars.bat` ran (it sets up the linker). SYCL kernels run on the device and aren't ported; with `-fsycl`, only host functions are profiled and ported.
+## Android
 
-Ruby, Java, Go, PHP, C, C++, C# and R need no headers, bindings or extra tools: the port is a plain Rust library with one C entry point taking and returning JSON, and fast-anything replays the recorded calls against it directly. Any language that can call C can use that bridge. A C port also has a typed entry point that takes the function's own arguments and returns its result, NaN and infinity included; the C app calls that one, and verify replays and times it.
+Android apps run on ART, so they're profiled on the device instead:
+
+```sh
+fast-anything scan --android com.example.app --duration 10
+```
+
+It ranks the app's own methods with simpleperf over adb (debuggable or profileable build). Device measurements (`import gfxinfo`, `perfetto`, `simpleperf`, `json`) go in the report in their own section. Ranking only: Android code isn't ported, and ART times are never compared with host ones.
+
+## Agents
+
+- **Claude Code**: `/plugin marketplace add EL4CTEO/fast-anything`, then `/plugin install fast-anything@fast-anything`
+- **Codex**: `codex plugin marketplace add EL4CTEO/fast-anything`
+- **MCP server** (any client): `claude mcp add fast-anything -- fast-anything mcp`
+- **Skill**: [`skills/fast-anything`](skills/fast-anything/SKILL.md) teaches any agent the loop
 
 ## Sponsors
 
@@ -125,8 +120,6 @@ fast-anything is free and open source. If it saves you time, sponsoring keeps it
 <p>
   <a href="https://github.com/sponsors/EL4CTEO"><img src="https://img.shields.io/badge/Become_a_sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white" alt="Become a sponsor"></a>
 </p>
-
-Company sponsors get a logo and a link here, nothing more: no paid recommendations.
 
 ## License
 

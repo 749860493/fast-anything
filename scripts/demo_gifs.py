@@ -113,35 +113,33 @@ SYMBOLS.update(SYMBOL_SPIN)
 
 GO = [
     ("type", "fast-anything go --agent claude -- python app.py"),
-    ("out", "[o]⚡ fast-anything[/] [d]v0.1.0[/]"),
+    ("out", "[o]⚡ fast-anything[/] [d]v0.9.0[/]"),
     ("spin", "profiling [b]python app.py[/]", 1.2),
-    ("out", "[g]✓[/] [b]python app.py[/] ran in 21.73s [d](under the profiler)[/]"),
+    ("out", "[g]✓[/] [b]python app.py[/] ran in 21.38s under the profiler"),
     ("out", ""),
-    ("out", "[d]   #  function                time              calls  verdict[/]"),
-    ("out", "   1  fuzzy.find_duplicates   [o]█████████[/]  99.9%        1  [g]✓ port it[/]", 160),
-    ("out", "[d]   2  fuzzy.levenshtein       █████████  99.6%  244,650  ↳ ported inside it[/]"),
-    ("out", "[d]   3  fuzzy.normalize                     0.0%      700  ↳ ported inside it[/]"),
-    ("out", "[d]   4  app.py:main             █████████ 100.0%        1  ✗ lives in the entry script[/]"),
+    ("out", "[d]   #  function                total             self    calls  verdict[/]"),
+    ("out", "   1  fuzzy.find_duplicates   [o]█████████[/] 100.0%   0.4%        1  [g]✓ port it[/]", 160),
+    ("out", "[d]   2  app.py:main             █████████ 100.0%   0.0%        1  ✗ does I/O: print[/]"),
+    ("out", "[d]   3  fuzzy.levenshtein       █████████  99.6%  59.9%  244,650  ↳ ported inside it[/]"),
+    ("out", "[d]   4  fuzzy.normalize                     0.0%   0.0%      700  ↳ ported inside it[/]"),
     ("out", ""),
-    ("spin", "recording real calls to [b]fuzzy.find_duplicates[/]", 0.8),
+    ("spin", "running the app again to record real calls to [b]fuzzy.find_duplicates[/]", 0.8),
     ("spin", "[b]claude[/] is writing the Rust port [d](attempt 1/3)[/]", 2.0),
     ("spin", "building [b]fa_fuzzy_find_duplicates[/] [d](release)[/]", 0.8),
-    ("spin", "replaying recorded + derived calls against the Rust port", 0.6),
-    ("out", "[g]✓[/] 26/26 calls give the same result [d](1 recorded + 25 derived)[/]", 300),
+    ("out", "[g]✓[/] 26/26 calls give the same result [d](1 recorded + 12 edge cases + 13 derived)[/]", 300),
     ("out", "[g]✓[/] [b]fuzzy.find_duplicates[/] now runs in Rust"),
-    ("spin", "timing [b]python app.py[/] [d](5 runs each, interleaved)[/]", 1.0),
+    ("spin", "timing [b]python app.py[/] [d](5 rounds of Python twice and Rust once, rotated)[/]", 1.0),
     ("out", ""),
-    ("out", "  Python      [d]████████████████████████[/] 5.05s", 200),
-    ("out", "  Rust        [o]▎[/]                        49ms", 200),
+    ("out", "  Python      [d]████████████████████████[/] 4.91s", 200),
+    ("out", "  Rust        [o]▎[/]                        42ms", 200),
     ("out", ""),
-    ("out", "[g]✓[/] [b]python app.py[/] is [o]103× faster[/] end to end", 4500),
+    ("out", "[g]✓[/] [b]python app.py[/] is [o]116× faster[/] end to end [d](median of 5 rounds; A/A ±1.2%)[/]", 4500),
 ]
 
 VERIFY = [
     ("type", "fast-anything verify"),
     ("spin", "building [b]fa_fuzzy_levenshtein[/] [d](release)[/]", 0.6),
-    ("spin", "replaying 500 recorded calls against the Rust port", 0.6),
-    ("out", "[r]✗[/] 148/500 recorded calls don't match", 250),
+    ("out", "[r]✗[/] 148/532 calls don't match", 250),
     ("out", "    levenshtein('neah larsen', 'josé smita')"),
     ("out", "      expected [g]10[/]"),
     ("out", "      got      [r]11[/]", 250),
@@ -152,11 +150,10 @@ VERIFY = [
     ("out", "[d]# the port compared bytes, Python compares characters. Fixed:[/]", 1500),
     ("type", "fast-anything verify"),
     ("spin", "building [b]fa_fuzzy_levenshtein[/] [d](release)[/]", 0.6),
-    ("spin", "replaying 500 recorded calls against the Rust port", 0.6),
-    ("out", "[g]✓[/] 500/500 recorded calls give the same result", 300),
+    ("out", "[g]✓[/] 532/532 calls give the same result [d](400 recorded + 100 held out + 12 edge cases + 20 derived)[/]", 300),
     ("out", "[g]✓[/] [b]fuzzy.levenshtein[/] per call: 18.9µs in Python, 450ns in Rust: [o]42× faster[/]", 4000),
 ]
 
 if __name__ == "__main__":
-    make("demo.gif", GO, 920, 22)
-    make("verify.gif", VERIFY, 920, 17)
+    make("demo.gif", GO, 1060, 22)
+    make("verify.gif", VERIFY, 1060, 16)
