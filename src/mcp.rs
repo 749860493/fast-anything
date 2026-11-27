@@ -82,7 +82,7 @@ fn call(params: &Value) -> Result<Value> {
                 .iter()
                 .take(10)
                 .map(|h| {
-                    json!({ "id": h.id, "share": h.share, "calls": h.ncalls, "worth_porting": h.worth_it(), "why_not": h.why_not(),
+                    json!({ "id": h.id, "share": h.share, "self_share": h.effective_self_share(scan.wall), "calls": h.ncalls, "worth_porting": h.worth_it(), "why_not": h.why_not(),
                                   "blockers": h.blockers, "warnings": h.warnings, "file": h.file, "line": h.line })
                 })
                 .collect();
