@@ -223,8 +223,9 @@ pub fn profile(ctx: &Ctx, python: &str, app_args: &[String], duration: Option<f6
     let out = ctx.fast.join("profile.json");
     let job = json!({ "root": ctx.root, "out": out, "max": 40, "duration": duration });
     let limit = duration.map(|d| Duration::from_secs_f64(d + 15.0));
-    helper_for(ctx, python, "profile", job, app_args, limit)?;
-    serde_json::from_str(&fs::read_to_string(&out)?).context("reading the profile")
+    let run = helper_for(ctx, python, "profile", job, app_args, limit)?;
+    let profile: Profile = serde_json::from_str(&fs::read_to_string(&out)?).context("reading the profile")?;
+    Ok(profile.printed(&run))
 }
 
 const MAIN_GUARD: &[&str] =

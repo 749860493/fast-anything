@@ -17,6 +17,8 @@ pub struct ScanOut {
     pub wall: f64,
     pub hotspots: Vec<Hotspot>,
     pub notes: Vec<String>,
+    /// Where what the app printed while it was profiled is kept; None when it printed nothing.
+    pub app_output: Option<PathBuf>,
 }
 
 /// `duration`: stop the app after that many seconds (a GUI or a server that doesn't exit on its own).
@@ -59,7 +61,10 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
     if let Some(d) = duration.filter(|_| lang != Lang::CSharp) {
         ui::line(format!("  stopping it after {d}s"));
     }
+    let app_output = ctx.fast.join("app.log");
+    let _ = fs::remove_file(&app_output);
     let profile = lang.profile(&ctx, &exe, &command[1..], duration).map_err(explain)?;
+    let app_output = keep_output(&app_output, &profile.output)?;
     let hotspots = hotspot::rank(profile.functions, profile.wall);
     let mut notes = profile.notes;
     notes.extend(attribution_notes(&hotspots));
@@ -69,7 +74,16 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
     ctx.state.wall = profile.wall;
     ctx.state.hotspots = hotspots.clone();
     ctx.save()?;
-    Ok(ScanOut { command, wall: profile.wall, hotspots, notes })
+    Ok(ScanOut { command, wall: profile.wall, hotspots, notes, app_output })
+}
+
+/// Keep what the app printed, so a successful scan doesn't swallow it (#142).
+fn keep_output(path: &Path, printed: &str) -> Result<Option<PathBuf>> {
+    if printed.trim().is_empty() {
+        return Ok(None);
+    }
+    fs::write(path, printed).with_context(|| format!("saving the app's output to {}", path.display()))?;
+    Ok(Some(path.to_path_buf()))
 }
 
 /// What the ranking can't show by itself: no call counts from a sampling profiler, and a run that
@@ -639,6 +653,18 @@ mod tests {
         assert!(sampled[0].contains("no call counts"), "{sampled:?}");
         let low = attribution_notes(&[h(0.203, 0), h(0.1, 0)]);
         assert!(low.len() == 2 && low[1].starts_with("your biggest function takes only 20% of the run"), "{low:?}");
+    }
+
+    #[test]
+    fn the_apps_output_is_kept_when_it_printed_something() {
+        let dir = std::env::temp_dir().join(format!("fa-app-log-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("app.log");
+        assert_eq!(keep_output(&log, "  \n").unwrap(), None);
+        assert!(!log.exists());
+        assert_eq!(keep_output(&log, "done: 42\n").unwrap(), Some(log.clone()));
+        assert_eq!(fs::read_to_string(&log).unwrap(), "done: 42\n");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

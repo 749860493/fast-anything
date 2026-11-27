@@ -498,7 +498,7 @@ pub fn profile(ctx: &Ctx, dotnet: &str, args: &[String], duration: Option<f64>) 
             }
         })
         .collect();
-    Ok(Profile { wall, base: ".".into(), functions, notes })
+    Ok(Profile { wall, base: ".".into(), functions, notes, output: combined(&out) })
 }
 
 // ------------------------------------------------------------------ editing the source

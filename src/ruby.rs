@@ -82,8 +82,9 @@ fn runner_for(
 pub fn profile(ctx: &Ctx, ruby: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let result = ctx.fast.join("profile.json");
     let job = json!({ "root": ctx.root, "out": result, "duration": duration });
-    runner_for(ctx, ruby, "profile", job, args, duration.map(|d| Duration::from_secs_f64(d + 15.0)))?;
-    serde_json::from_str(&fs::read_to_string(&result)?).context("reading the profile")
+    let run = runner_for(ctx, ruby, "profile", job, args, duration.map(|d| Duration::from_secs_f64(d + 15.0)))?;
+    let profile: Profile = serde_json::from_str(&fs::read_to_string(&result)?).context("reading the profile")?;
+    Ok(profile.printed(&run))
 }
 
 fn owner(hs_owner: Option<&str>) -> &str {

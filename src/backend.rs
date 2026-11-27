@@ -3,13 +3,13 @@
 
 use crate::hotspot::Hotspot;
 use crate::state::{Ctx, Port, Verify};
-use crate::util::{output, tail};
+use crate::util::{combined, output, tail};
 use crate::{cfamily, csharp, golang, java, kotlin, node, php, python, r, ruby};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,6 +37,16 @@ pub struct Profile {
     /// What the scan should tell the user besides the ranking.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// What the app printed while it was profiled (stdout, then stderr).
+    #[serde(skip)]
+    pub output: String,
+}
+
+impl Profile {
+    /// The profile, keeping what the profiled run printed.
+    pub fn printed(self, run: &Output) -> Profile {
+        Profile { output: combined(run), ..self }
+    }
 }
 
 #[derive(Deserialize)]
@@ -552,6 +562,18 @@ pub fn line_starting(text: &str, prefixes: &[&str]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_keeps_what_the_app_printed() {
+        let run = Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args(if cfg!(windows) { ["/C", "echo out& echo err 1>&2"] } else { ["-c", "echo out; echo err >&2"] })
+            .output()
+            .unwrap();
+        let profile: Profile = serde_json::from_str(r#"{"wall": 1.0, "base": ".", "functions": []}"#).unwrap();
+        assert!(profile.output.is_empty(), "not in the JSON a backend's helper writes");
+        let text = profile.printed(&run).output.replace("\r\n", "\n");
+        assert!(text.starts_with("out") && text.trim_end().ends_with("err"), "{text:?}");
+    }
 
     #[test]
     fn source_hash_follows_the_sources() {

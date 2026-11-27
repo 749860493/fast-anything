@@ -346,7 +346,7 @@ pub fn profile(ctx: &Ctx, go: &str, args: &[String], duration: Option<f64>) -> R
             functions.push(hotspot(ctx, f, flat, cum));
         }
     }
-    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new(), output: combined(&out) })
 }
 
 fn pkg_name(ctx: &Ctx, hs: &Hotspot) -> Result<String> {

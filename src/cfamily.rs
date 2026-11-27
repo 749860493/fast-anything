@@ -919,7 +919,7 @@ pub fn profile(ctx: &Ctx, cc: &str, args: &[String], lang: Lang, duration: Optio
             None => {}
         }
     }
-    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new(), output: combined(&ran) })
 }
 
 // ------------------------------------------------------------------ recording

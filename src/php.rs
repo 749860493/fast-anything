@@ -230,7 +230,7 @@ pub fn profile(ctx: &Ctx, php: &str, args: &[String], duration: Option<f64>) -> 
             None => {}
         }
     }
-    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new() })
+    Ok(Profile { wall, base: ".".into(), functions, notes: Vec::new(), output: combined(&run) })
 }
 
 fn name_const(hs: &Hotspot) -> &'static str {

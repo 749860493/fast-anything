@@ -49,6 +49,7 @@ pub fn scan(s: &ScanOut) {
         for n in &s.notes {
             ui::line(format!("  {}", yellow(format!("! {n}"))));
         }
+        app_output(s);
         return;
     }
     ui::line(dim(format!("   #  {}  {:<16} {:>6}{:>11}  verdict", pad("function", 30), "total", "self", "calls")));
@@ -85,11 +86,18 @@ pub fn scan(s: &ScanOut) {
     if !s.notes.is_empty() {
         ui::line("");
     }
+    app_output(s);
     match s.hotspots.iter().find(|h| h.worth_it()) {
         Some(h) => next(&format!("fast-anything port {}", h.id)),
         None => {
             ui::line("  Nothing portable takes a real share of the run yet. The ✗ reasons above say what's in the way.")
         }
+    }
+}
+
+fn app_output(s: &ScanOut) {
+    if let Some(path) = &s.app_output {
+        ui::line(dim(format!("  what the app printed is in {}", path.display())));
     }
 }
 
@@ -330,6 +338,7 @@ pub fn scan_json(s: &ScanOut) -> Value {
         "wall_seconds": s.wall,
         "hotspots": hotspots,
         "notes": s.notes,
+        "app_output": s.app_output,
     })
 }
 
@@ -441,8 +450,10 @@ mod tests {
                 },
             ],
             notes: vec!["note".into()],
+            app_output: Some(PathBuf::from(".fast/app.log")),
         };
         let parsed = parse(scan_json(&scan));
+        assert_eq!(parsed["app_output"], ".fast/app.log");
         assert_eq!(parsed["command"], json!(["python", "app.py"]));
         assert_eq!(parsed["wall_seconds"], 2.5);
         assert_eq!(

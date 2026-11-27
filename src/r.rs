@@ -177,7 +177,8 @@ pub fn profile(ctx: &Ctx, rscript: &str, args: &[String], duration: Option<f64>)
     let result = ctx.fast.join("profile.json");
     let job = json!({ "root": ctx.root, "rprof": rprof, "entry": ctx.root.join(script), "out": result });
     runner(ctx, rscript, "report", job)?;
-    serde_json::from_str(&fs::read_to_string(&result)?).context("reading the profile")
+    let profile: Profile = serde_json::from_str(&fs::read_to_string(&result)?).context("reading the profile")?;
+    Ok(profile.printed(&run))
 }
 
 fn wrap_line(name: &str) -> String {
